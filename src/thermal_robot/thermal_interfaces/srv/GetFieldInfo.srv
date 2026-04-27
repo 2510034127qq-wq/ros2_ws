@@ -1,0 +1,17 @@
+# GetFieldInfo.srv — query live thermal field statistics
+# Server: /thermal/get_field_info  (reconstructor_node)
+# Ref: Reggente & Lilienthal 2009 DOI:10.1109/ICSENS.2009.5398427
+bool include_full_data
+---
+bool   success
+string message
+uint32 width
+uint32 height
+float32 min_temperature_celsius
+float32 max_temperature_celsius
+float32 mean_temperature_celsius
+float32 std_temperature_celsius
+uint32    hotspot_count
+float32[] hotspot_temperatures
+string reconstruction_method
+builtin_interfaces/Time last_update_stamp

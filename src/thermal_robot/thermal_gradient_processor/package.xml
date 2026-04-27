@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>thermal_gradient_processor</name>
+  <version>0.1.0</version>
+  <description>Thermal gradient processor. Sobel/central-diff. Route A. DOI:10.1016/j.robot.2020.103687</description>
+  <maintainer email="thermal_robot@example.com">thermal_robot</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>thermal_interfaces</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!--
+  navigate_to_pose_simple.xml
+  自定义简化行为树 — 不使用 RateController 节点
+  ===================================================
+  用途：替代 Humble 系统默认 BT XML（含 RateController），
+        解决 libnav2_rate_control_bt_node.so 缺失导致 bt_navigator 崩溃的问题。
+
+  设计原则：
+    - 完全不依赖 RateController（该节点在部分 Humble 安装中缺失）
+    - 保留路径规划 + 路径跟随 + 基础恢复行为（清地图/等待）
+    - 同时作为 navigate_to_pose 和 navigate_through_poses 的默认 BT
+    - 适合热导航场景：目标精度要求低（xy_tol=1.5m），简单可靠优先
+
+  功能节点（均在标准 Humble 安装中存在）：
+    ComputePathToPose     — 全局 A* 路径规划
+    FollowPath            — RegulatedPurePursuit 路径跟随
+    ClearEntireCostmap    — 清除代价地图（恢复用）
+    Wait                  — 等待（恢复用）
+
+  Ref: nav2_bt_navigator Humble, DOI:10.1109/IROS45743.2020.9341207
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <!--
+      RecoveryNode: 尝试导航，失败时执行恢复序列
+      number_of_retries="3": 最多重试3次
+    -->
+    <RecoveryNode number_of_retries="3" name="NavigateWithRecovery">
+
+      <!-- 主导航序列：规划路径 → 跟随路径 -->
+      <PipelineSequence name="NavigatePipeline">
+        <ComputePathToPose
+          goal="{goal}"
+          path="{path}"
+          planner_id="GridBased"/>
+        <FollowPath
+          path="{path}"
+          controller_id="FollowPath"/>
+      </PipelineSequence>
+
+      <!-- 恢复序列：清全局代价地图 → 等待2s -->
+      <Sequence name="RecoverySequence">
+        <ClearEntireCostmap
+          name="ClearGlobal"
+          service_name="global_costmap/clear_entirely_global_costmap"/>
+        <Wait wait_duration="2"/>
+      </Sequence>
+
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

@@ -1,0 +1,27 @@
+# ROS 2 / colcon generated output
+build/
+install/
+log/
+
+# Runtime and experiment data
+bags/
+*.bag
+*.db3
+rosbag2_*/
+
+# Python cache and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local tool/editor state
+.codex
+.claude/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

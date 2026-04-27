@@ -1,0 +1,134 @@
+<?xml version="1.0"?>
+<!--
+  g1_thermal.urdf.xacro — Gazebo-ready wrapper for G1 29-DOF robot (Route A).
+
+  Usage (auto-processed by launch file):
+    xacro $(find g1_description)/urdf/g1_thermal.urdf.xacro > /tmp/g1_thermal.urdf
+
+  What this file does:
+    1. Includes the original user-provided URDF (NOT modified).
+       Place the original at: g1_description/urdf/g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf
+    2. Adds Gazebo material colours for visualisation.
+    3. Adds libgazebo_ros_planar_move  → responds to /cmd_vel.
+    4. Adds libgazebo_ros_joint_state_publisher → publishes /joint_states.
+
+  Refs:
+    gazebo_ros_pkgs: https://github.com/ros-simulation/gazebo_ros_pkgs
+    Macenski 2022   DOI:10.1126/scirobotics.abm6074
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro"
+       name="g1_29dof_rev_1_0_with_inspire_hand_FTP">
+
+  <!-- ═══ 1. Original G1 robot definition (DO NOT modify source file) ═════ -->
+  <xacro:include filename="$(find g1_description)/urdf/g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf"/>
+
+  <!-- ═══ 2. Gazebo material colours ══════════════════════════════════════ -->
+  <gazebo reference="pelvis"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="left_ankle_roll_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="right_ankle_roll_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="head_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="logo_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="left_base_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="right_base_link"><material>Gazebo/DarkGrey</material></gazebo>
+  <gazebo reference="left_hip_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_hip_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_hip_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_knee_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_ankle_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_hip_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_hip_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_hip_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_knee_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_ankle_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="waist_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="waist_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="torso_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_shoulder_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_shoulder_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_shoulder_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_elbow_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_wrist_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_wrist_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="left_wrist_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_shoulder_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_shoulder_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_shoulder_yaw_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_elbow_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_wrist_roll_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_wrist_pitch_link"><material>Gazebo/White</material></gazebo>
+  <gazebo reference="right_wrist_yaw_link"><material>Gazebo/White</material></gazebo>
+
+  <!-- ═══ 3. Planar Move Plugin ════════════════════════════════════════════
+       Directly moves the pelvis (base) in response to /cmd_vel Twist.
+       Appropriate for Route A: locomotion is not simulated at joint level.
+       Plugin: libgazebo_ros_planar_move.so (Gazebo Classic 11 / ROS 2 Humble)
+       Ref: https://github.com/ros-simulation/gazebo_ros_pkgs/tree/ros2/gazebo_plugins
+  ══════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin name="gazebo_ros_planar_move" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <remapping>cmd_vel:=/cmd_vel</remapping>
+        <remapping>odom:=/odom</remapping>
+      </ros>
+      <update_rate>50</update_rate>
+      <publish_rate>10</publish_rate>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>pelvis</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <!-- ═══ 4. Joint State Publisher Plugin ══════════════════════════════════
+       Publishes /joint_states for all 41 non-mimic joints.
+       robot_state_publisher uses this to broadcast TF tree.
+  ══════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin name="gazebo_ros_joint_state_publisher"
+            filename="libgazebo_ros_joint_state_publisher.so">
+      <update_rate>50</update_rate>
+      <joint_name>left_hip_pitch_joint</joint_name>
+      <joint_name>left_hip_roll_joint</joint_name>
+      <joint_name>left_hip_yaw_joint</joint_name>
+      <joint_name>left_knee_joint</joint_name>
+      <joint_name>left_ankle_pitch_joint</joint_name>
+      <joint_name>left_ankle_roll_joint</joint_name>
+      <joint_name>right_hip_pitch_joint</joint_name>
+      <joint_name>right_hip_roll_joint</joint_name>
+      <joint_name>right_hip_yaw_joint</joint_name>
+      <joint_name>right_knee_joint</joint_name>
+      <joint_name>right_ankle_pitch_joint</joint_name>
+      <joint_name>right_ankle_roll_joint</joint_name>
+      <joint_name>waist_yaw_joint</joint_name>
+      <joint_name>waist_roll_joint</joint_name>
+      <joint_name>waist_pitch_joint</joint_name>
+      <joint_name>left_shoulder_pitch_joint</joint_name>
+      <joint_name>left_shoulder_roll_joint</joint_name>
+      <joint_name>left_shoulder_yaw_joint</joint_name>
+      <joint_name>left_elbow_joint</joint_name>
+      <joint_name>left_wrist_roll_joint</joint_name>
+      <joint_name>left_wrist_pitch_joint</joint_name>
+      <joint_name>left_wrist_yaw_joint</joint_name>
+      <joint_name>right_shoulder_pitch_joint</joint_name>
+      <joint_name>right_shoulder_roll_joint</joint_name>
+      <joint_name>right_shoulder_yaw_joint</joint_name>
+      <joint_name>right_elbow_joint</joint_name>
+      <joint_name>right_wrist_roll_joint</joint_name>
+      <joint_name>right_wrist_pitch_joint</joint_name>
+      <joint_name>right_wrist_yaw_joint</joint_name>
+      <joint_name>left_thumb_1_joint</joint_name>
+      <joint_name>left_thumb_2_joint</joint_name>
+      <joint_name>left_index_1_joint</joint_name>
+      <joint_name>left_middle_1_joint</joint_name>
+      <joint_name>left_ring_1_joint</joint_name>
+      <joint_name>left_little_1_joint</joint_name>
+      <joint_name>right_thumb_1_joint</joint_name>
+      <joint_name>right_thumb_2_joint</joint_name>
+      <joint_name>right_index_1_joint</joint_name>
+      <joint_name>right_middle_1_joint</joint_name>
+      <joint_name>right_ring_1_joint</joint_name>
+      <joint_name>right_little_1_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+</robot>

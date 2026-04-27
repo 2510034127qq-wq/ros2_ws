@@ -1,0 +1,125 @@
+# =============================================================================
+# params.yaml — Version: v26 Config-B
+#
+# v26 修复依据（Config-B 测试：1/3，SA_left t=133s确认后1867s无进展）
+# 根因：frontier dist_sigma=8.0 下，3m处score(0.28) >> 9.6m处score(0.15)，
+# 机器人始终在SA_left 3-6m环内选取前沿目标，SB_far/SC_weak永远不被选中。
+#
+# 核心修复：
+#   post_confirm_rounds=10：确认源后10轮frontier强制min_d=7m, dist_sigma=15m
+#   levy_post_confirm_step=10：确认后立即向已知源质心反方向跳跃10m
+#   no_new_source_timeout: 120→60s（更快触发无进展逃逸）
+# =============================================================================
+
+sensor_node:
+  ros__parameters:
+    publish_rate:  10.0
+    frame_id:      "thermal_camera"
+    image_width:   64
+    image_height:  48
+    ambient_temp:  22.0
+    noise_std:     0.5
+    random_seed:   42
+    num_sources:   3
+
+preprocessor_node:
+  ros__parameters:
+    filter_method:        "kalman"
+    frame_id:             "thermal_camera"
+    moving_avg_window:    8
+    exp_smooth_alpha:     0.2
+    kalman_q:             0.08
+    kalman_r:             4.0
+    spatial_smooth:       true
+    spatial_sigma:        0.8
+
+reconstructor_node:
+  ros__parameters:
+    reconstruction_method:  "direct_linear"
+    frame_id:               "thermal_camera"
+    resolution_x:           0.01
+    resolution_y:           0.01
+    origin_x:               0.0
+    origin_y:               0.0
+    hotspot_min_temp_delta: 4.0
+    hotspot_max_count:      5
+    hotspot_min_distance:   5
+
+gradient_node:
+  ros__parameters:
+    method:             "sobel"
+    subsample_stride:   4
+    frame_id:           "thermal_camera"
+
+controller_node:
+  ros__parameters:
+    publish_rate:       10.0
+    max_linear_vel:     0.25
+    max_angular_vel:    0.5
+    kp_angular:         1.2
+    ang_smooth_alpha:   0.3
+    ambient_temp:            22.0
+    ambient_update_margin:   1.5
+    min_gradient_mag:        0.04
+    min_ascent_temp_rise:    0.5
+    peak_window_s:           4.0
+    peak_temp_delta:         15.0
+    plateau_thresh:          2.0
+    peak_confirm_s:          2.0
+    rearm_cool_delta:        6.0
+    source_repulsion_k:          0.8
+    source_repulsion_min_dist:   0.5
+    source_exclusion_radius:     2.0
+    revisit_radius:              2.0
+    relocate_dist:      2.0
+    relocate_lin_vel:   0.2
+    peak_hold_s:        1.5
+    num_sources:        3
+    spawn_x:           -6.0
+    spawn_y:            0.0
+    stuck_timeout:              60.0  # v30: Nav2 handles stuck recovery
+    stuck_dist_thresh:           0.5
+    thermal_lost_temp_thresh:    0.8
+    thermal_lost_timeout:       45.0  # v30 FIX: 给Nav2启动更多时间
+    centroid_arrival_r:          3.0
+    max_search_radius:          12.0
+    negative_trise_bail:         0.3
+    no_new_source_timeout:      60.0   # v26: 120→60s
+
+    # ── Frontier + Lévy ────────────────────────────────────────────────────
+    frontier_update_interval:    3.0
+    frontier_arrival_r:          2.5
+    frontier_nav_lin_vel:        0.22
+    levy_rounds_trigger:         2
+    levy_region_novelty_thr:     0.15
+    levy_mu:                     1.5
+    levy_scale:                  3.0
+    levy_min_step:               3.0
+    levy_max_step:              13.0
+    escape_frontier_bias:        0.35
+    frontier_safe_buf:           0.3
+    heat_sigma:                  1.1
+    escape_loop_max:             3
+    escape_loop_window_s:       30.0
+
+    # ── v26 Post-Confirm Exploration Boost ──────────────────────────────────
+    post_confirm_rounds:       10     # 确认源后强制远场探索的轮数
+    post_confirm_min_d:         7.0   # boost期间frontier最小距离
+    post_confirm_dist_sigma:   15.0   # boost期间距离衰减sigma
+    levy_post_confirm_step:    10.0   # 确认后定向Lévy步长
+
+    # ── CONVERGE ─────────────────────────────────────────────────────────────
+    pre_peak_thresh_ratio:    0.25
+    converge_circle_radius:   1.5
+    converge_lin_vel:         0.10
+    converge_max_s:           90.0
+    converge_to_sample_ratio:  0.65
+    converge_cold_exit_s:      8.0
+    converge_sticky_max:         3
+    converge_sticky_return_vel:  0.18
+    converge_best_of_n_ratio:    0.90
+
+    # ── SAMPLE ───────────────────────────────────────────────────────────────
+    sample_center_pixel_radius: 12
+    sample_hold_s:       3.0
+    sample_min_trise:    8.0
