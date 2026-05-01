@@ -561,6 +561,8 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
             'thermal_scene_obstacle_field.world',
             'thermal_scene_corridor_rooms.world',
             'thermal_scene_mixed_rooms.world',
+            'thermal_scene_zigzag_corridors.world',
+            'thermal_scene_sparse_islands.world',
         }
         paths = {path.name: path for path in world_dir.glob('*.world')}
         self.assertTrue(expected.issubset(paths.keys()))
@@ -596,10 +598,15 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertGreaterEqual(len(representative_worlds), 4)
         self.assertGreaterEqual(len(representative_scenarios), 4)
 
+        extended_worlds = {case.world.name for case in module.EXTENDED_CASES}
+        extended_scenarios = {case.scenario.name for case in module.EXTENDED_CASES}
+        self.assertGreaterEqual(len(extended_worlds), 6)
+        self.assertGreaterEqual(len(extended_scenarios), 6)
+
         full_cases = module._full_cases()
         full_worlds = {case.world.name for case in full_cases}
         full_scenarios = {case.scenario.name for case in full_cases}
-        self.assertGreaterEqual(len(full_worlds), 4)
+        self.assertGreaterEqual(len(full_worlds), 6)
         self.assertGreaterEqual(len(full_scenarios), 6)
         self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
 
@@ -611,7 +618,11 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         params_text = params_path.read_text()
         self.assertIn('nav2_progress_timeout_s', controller_text)
         self.assertIn('_nav2_progress_stalled', controller_text)
+        self.assertIn('_source_set_expansion_target', controller_text)
         self.assertIn('nav2_stall_direct_s', params_text)
+        self.assertIn('source_set_expansion_max_d', params_text)
+        self.assertIn('source_set_outward_bonus', params_text)
+        self.assertIn('source_set_direct_first_s', params_text)
 
     def test_T_PY25_coverage_ring_prefers_fov_unknown_region(self):
         """T-PY25: 环形覆盖目标按下一视场收益选点，而不是固定方向或真值坐标."""
@@ -704,7 +715,7 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
 
-        self.assertEqual(module.source_match_radius({'sigma': '0.3'}, {'sigma': '0.4'}), 1.5)
+        self.assertEqual(module.source_match_radius({'sigma': '0.3'}, {'sigma': '0.4'}), 2.0)
         self.assertEqual(module.source_match_radius({'sigma': '1.0'}, {'sigma': '0.5'}), 2.0)
 
 

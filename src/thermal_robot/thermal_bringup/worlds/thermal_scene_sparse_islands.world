@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="thermal_nav_sparse_islands">
+    <physics type="ode">
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+    </physics>
+
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <scene>
+      <ambient>0.48 0.48 0.48 1</ambient>
+      <background>0.18 0.21 0.22 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>0 0 24 0 1.5707 0</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+    <model name="robot_start_marker">
+      <static>true</static>
+      <pose>-6.0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="pad">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.6 0.6 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="island_west_gate">
+      <static>true</static>
+      <pose>-3.7 0.9 0.45 0 0 0.25</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.5 0.8 0.9</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="island_south_gate">
+      <static>true</static>
+      <pose>-2.5 -2.5 0.45 0 0 -0.6</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.7 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.7 0.8 0.9</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="island_center_slant">
+      <static>true</static>
+      <pose>0.2 0.1 0.5 0 0 0.9</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>2.2 0.7 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.2 0.7 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="island_north_mid">
+      <static>true</static>
+      <pose>1.8 3.0 0.45 0 0 0.15</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.6 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.6 0.8 0.9</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="island_east_pair_a">
+      <static>true</static>
+      <pose>4.0 -1.6 0.45 0 0 0.35</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.4 0.8 0.9</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="island_east_pair_b">
+      <static>true</static>
+      <pose>5.6 1.5 0.45 0 0 -0.35</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.5 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.5 0.8 0.9</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

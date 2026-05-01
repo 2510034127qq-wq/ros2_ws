@@ -25,7 +25,7 @@ def as_float(row, key, default=0.0):
 def source_match_radius(truth: dict | None, estimate: dict | None) -> float:
     truth_sigma = as_float(truth or {}, 'sigma')
     estimate_sigma = as_float(estimate or {}, 'sigma')
-    return max(1.5, 2.0 * truth_sigma, 2.0 * estimate_sigma)
+    return max(2.0, 2.0 * truth_sigma, 2.0 * estimate_sigma)
 
 
 def compute(run_dir: Path) -> dict:

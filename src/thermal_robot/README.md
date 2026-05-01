@@ -109,6 +109,8 @@ thermal_scene_nav.world              open baseline world
 thermal_scene_obstacle_field.world   obstacle-field world
 thermal_scene_corridor_rooms.world   corridor and rooms world
 thermal_scene_mixed_rooms.world      mixed rooms and obstacle world
+thermal_scene_zigzag_corridors.world zigzag corridor stress world
+thermal_scene_sparse_islands.world   sparse clutter/island stress world
 ```
 
 Available dynamic thermal scenarios:
@@ -143,6 +145,17 @@ python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
   --min-recall 0.333
 ```
 
+Extended stress matrix with the additional validation worlds:
+
+```bash
+python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
+  --preset extended \
+  --out-root /tmp/thermal_world_scenario_matrix_extended \
+  --duration 90 \
+  --warmup 36 \
+  --min-recall 0.333
+```
+
 Full matrix across all configured worlds and scenarios:
 
 ```bash
@@ -161,19 +174,22 @@ python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
   --case test1:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_corridor_rooms.world:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/dynamic_appear_disappear_sources.yaml
 ```
 
-Latest representative evidence from 2026-05-02:
+Latest extended evidence from 2026-05-02:
 
 ```text
-/tmp/thermal_world_scenario_matrix_ring_representative
-open_config_b       recall=0.667 precision=1.000 duplicate=0
-obstacle_linear     recall=0.667 precision=1.000 duplicate=0
-corridor_appear     recall=0.667 precision=1.000 duplicate=0
-mixed_waypoint      recall=0.667 precision=1.000 duplicate=0
+/tmp/thermal_world_scenario_matrix_extended_optimized90
+open_config_b          recall=0.667 precision=1.000 duplicate=0
+obstacle_linear        recall=1.000 precision=1.000 duplicate=0
+corridor_appear        recall=0.667 precision=1.000 duplicate=0
+mixed_waypoint         recall=0.667 precision=1.000 duplicate=0
+zigzag_circular        recall=0.667 precision=1.000 duplicate=0
+islands_static_offset  recall=0.333 precision=1.000 duplicate=0
 ```
 
-This is a regression gate, not a proof of full generalization.  Use the full
-matrix or add more randomized world/scenario pairs before treating the
-algorithm as broadly validated.
+This is a stronger regression gate than the 4-case representative matrix, but
+still not a proof of full generalization. Use the full matrix, longer runtime,
+random seeds, multi-spawn tests, and different source counts before treating
+the algorithm as broadly validated.
 
 ## Build
 

@@ -76,7 +76,7 @@ source_tracker_node:
     max_detections:           12
     gate_m:                    1.25
     merge_radius_m:            1.0
-    duplicate_radius_m:        2.5
+    duplicate_radius_m:        3.5
     confirm_probability:       0.75
     confirm_observations:      5
     confirm_covariance_max:    0.9
@@ -121,7 +121,7 @@ controller_node:
     no_new_source_timeout:      60.0   # v26: 120→60s
 
     # ── Frontier + Lévy ────────────────────────────────────────────────────
-    frontier_update_interval:    3.0
+    frontier_update_interval:    8.0
     frontier_arrival_r:          2.5
     frontier_nav_lin_vel:        0.22
     levy_rounds_trigger:         2
@@ -132,6 +132,7 @@ controller_node:
     levy_max_step:              13.0
     escape_frontier_bias:        0.35
     frontier_safe_buf:           0.3
+    frontier_cold_timeout_s:    32.0
     heat_sigma:                  1.1
     escape_loop_max:             3
     escape_loop_window_s:       30.0
@@ -175,9 +176,15 @@ controller_node:
     coverage_ring_rings:              3
     coverage_recent_yaw_penalty:      0.45
     coverage_recent_yaw_window:       5
-    nav2_progress_timeout_s:          8.0
+    source_set_expansion_min_sources: 2
+    source_set_expansion_max_d:       13.0
+    source_set_expansion_directional_weight: 0.35
+    source_set_outward_directional_weight: 0.85
+    source_set_outward_bonus:         0.35
+    source_set_direct_first_s:        32.0
+    nav2_progress_timeout_s:          4.0
     nav2_progress_min_delta:          0.35
-    nav2_stall_direct_s:             12.0
+    nav2_stall_direct_s:             16.0
 
     # ── World-map information-gain planner ─────────────────────────────────
     planner_information_gain_weight:       1.0

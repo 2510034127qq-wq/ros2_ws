@@ -103,6 +103,10 @@ _ASCENT_EXIT_GM_FACTOR = 0.5
 _ASCENT_EXIT_TRISE     = 0.8
 
 
+def _wrap_angle_local(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # ThermalBeliefMap  (unchanged from v30)
 # ════════════════════════════════════════════════════════════════════════════
@@ -310,7 +314,7 @@ class ControllerNode(Node):
         self.declare_parameter('survey_novelty_safe_dist',    4.0)
         self.declare_parameter('survey_waypoint_timeout_s',  60.0)
         self.declare_parameter('fine_mode_entry_thresh',      2.0)
-        self.declare_parameter('frontier_cold_timeout_s',    20.0)
+        self.declare_parameter('frontier_cold_timeout_s',    32.0)
         self.declare_parameter('departure_timeout_s',       120.0)
         self.declare_parameter('departure_speed',             0.22)
         self.declare_parameter('planner_information_gain_weight', 1.0)
@@ -337,9 +341,15 @@ class ControllerNode(Node):
         self.declare_parameter('coverage_ring_rings', 3)
         self.declare_parameter('coverage_recent_yaw_penalty', 0.45)
         self.declare_parameter('coverage_recent_yaw_window', 5)
-        self.declare_parameter('nav2_progress_timeout_s', 8.0)
+        self.declare_parameter('source_set_expansion_min_sources', 2)
+        self.declare_parameter('source_set_expansion_max_d', 13.0)
+        self.declare_parameter('source_set_expansion_directional_weight', 0.35)
+        self.declare_parameter('source_set_outward_directional_weight', 0.85)
+        self.declare_parameter('source_set_outward_bonus', 0.35)
+        self.declare_parameter('source_set_direct_first_s', 32.0)
+        self.declare_parameter('nav2_progress_timeout_s', 4.0)
         self.declare_parameter('nav2_progress_min_delta', 0.35)
-        self.declare_parameter('nav2_stall_direct_s', 12.0)
+        self.declare_parameter('nav2_stall_direct_s', 16.0)
 
         # ── Read parameters ───────────────────────────────────────────────
         g = self.get_parameter
@@ -452,6 +462,12 @@ class ControllerNode(Node):
         self._coverage_ring_rings = int(g('coverage_ring_rings').value)
         self._coverage_recent_yaw_penalty = float(g('coverage_recent_yaw_penalty').value)
         self._coverage_recent_yaw_window = max(1, int(g('coverage_recent_yaw_window').value))
+        self._source_set_expansion_min_sources = max(2, int(g('source_set_expansion_min_sources').value))
+        self._source_set_expansion_max_d = float(g('source_set_expansion_max_d').value)
+        self._source_set_expansion_directional_weight = float(g('source_set_expansion_directional_weight').value)
+        self._source_set_outward_directional_weight = float(g('source_set_outward_directional_weight').value)
+        self._source_set_outward_bonus = float(g('source_set_outward_bonus').value)
+        self._source_set_direct_first_s = float(g('source_set_direct_first_s').value)
         self._nav2_progress_timeout_s = float(g('nav2_progress_timeout_s').value)
         self._nav2_progress_min_delta = float(g('nav2_progress_min_delta').value)
         self._nav2_stall_direct_s = float(g('nav2_stall_direct_s').value)
@@ -1157,6 +1173,137 @@ class ControllerNode(Node):
     def _remember_coverage_yaw(self, tx: float, ty: float):
         self._coverage_recent_yaws.append(math.atan2(ty - self._wy, tx - self._wx))
 
+    def _source_set_gap_yaws(self, cx: float, cy: float) -> List[float]:
+        if len(self._found_sources) < 2:
+            return []
+        bearings = sorted(
+            _wrap_angle_local(math.atan2(sy - cy, sx - cx))
+            for sx, sy, _ in self._found_sources
+        )
+        gaps = []
+        for idx, yaw in enumerate(bearings):
+            nxt = bearings[(idx + 1) % len(bearings)]
+            gap = (nxt - yaw) % (2.0 * math.pi)
+            if gap <= 1e-3:
+                continue
+            mid = _wrap_angle_local(yaw + 0.5 * gap)
+            gaps.append((gap, mid))
+        gaps.sort(key=lambda item: item[0], reverse=True)
+        return [mid for _, mid in gaps]
+
+    def _source_set_expansion_target(self, min_travel_d: float):
+        if len(self._found_sources) < self._source_set_expansion_min_sources:
+            return None
+        if not self._map_available():
+            return None
+        cx, cy = self._sources_centroid()
+        yaw_candidates: List[Tuple[float, float, float, str]] = []
+        outward_yaw = math.atan2(cy - self._spawn_y, cx - self._spawn_x)
+        if math.hypot(cx - self._spawn_x, cy - self._spawn_y) > 1.0:
+            yaw_candidates.append((
+                outward_yaw,
+                self._source_set_outward_directional_weight,
+                self._source_set_outward_bonus,
+                'outward'))
+        sector = self._map_sector_yaw(
+            min_d=min_travel_d,
+            max_d=self._source_set_expansion_max_d,
+            safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+            phase_yaw=self._phase_yaw_for_coverage(),
+        )
+        if sector is not None:
+            yaw_candidates.append((
+                sector.yaw,
+                self._source_set_expansion_directional_weight,
+                0.0,
+                'map_sector'))
+        for yaw in self._source_set_gap_yaws(cx, cy):
+            yaw_candidates.append((
+                yaw,
+                self._source_set_expansion_directional_weight,
+                0.0,
+                'source_gap'))
+        yaw_candidates.append((
+            self._phase_yaw_for_coverage(),
+            self._source_set_expansion_directional_weight,
+            0.0,
+            'coverage_phase'))
+
+        best = None
+        best_yaw = None
+        best_label = 'source_set'
+        best_eval_score = -float('inf')
+        seen = set()
+        for yaw, dir_weight, bonus, label in yaw_candidates:
+            key = round(_wrap_angle_local(yaw), 2)
+            if key in seen:
+                continue
+            seen.add(key)
+            target = self._map_coverage_ring(
+                min_radius=max(self._safe_dist() + 1.0, self._coverage_ring_min_d),
+                max_radius=max(self._coverage_ring_max_d, self._source_set_expansion_max_d),
+                safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+                preferred_yaw=yaw,
+                directional_weight=dir_weight,
+                anchor=(cx, cy),
+                min_travel_d=min_travel_d,
+                max_travel_d=self._source_set_expansion_max_d,
+            )
+            if target is None:
+                continue
+            eval_score = target[2] + bonus
+            if best is None or eval_score > best_eval_score:
+                best = target
+                best_yaw = yaw
+                best_label = label
+                best_eval_score = eval_score
+        if best is None:
+            return None
+        return best, best_yaw, (cx, cy), best_label
+
+    def _best_departure_ring(self, cx: float, cy: float, min_travel_d: float):
+        if not self._map_available():
+            return None
+        max_d = max(self._pc_min_d + 2.0, self._departure_dist, self._coverage_ring_max_d)
+        yaw_candidates: List[float] = []
+        for phase in (self._phase_yaw_for_coverage(), self._phase_yaw_away_from_sources()):
+            sector = self._map_sector_yaw(
+                min_d=min_travel_d,
+                max_d=max_d,
+                safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+                phase_yaw=phase,
+            )
+            if sector is not None:
+                yaw_candidates.append(sector.yaw)
+            yaw_candidates.append(phase)
+
+        best = None
+        best_yaw = None
+        seen = set()
+        for yaw in yaw_candidates:
+            key = round(_wrap_angle_local(yaw), 2)
+            if key in seen:
+                continue
+            seen.add(key)
+            target = self._map_coverage_ring(
+                min_radius=max(self._safe_dist() + 1.0, self._coverage_ring_min_d),
+                max_radius=max_d,
+                safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+                preferred_yaw=yaw,
+                directional_weight=self._departure_directional_weight,
+                anchor=(cx, cy),
+                min_travel_d=min_travel_d,
+                max_travel_d=max_d,
+            )
+            if target is None:
+                continue
+            if best is None or target[2] > best[2]:
+                best = target
+                best_yaw = yaw
+        if best is None:
+            return None
+        return best, best_yaw
+
     def _map_region_novelty(self, radius=5.0):
         if not self._map_available():
             return self._bmap.region_novelty(self._wx, self._wy, radius=radius)
@@ -1266,6 +1413,14 @@ class ControllerNode(Node):
             return False
         if self._is_near_known():
             return False
+        if self._found_sources and self._nearest_known_dist() < self._pc_guard_near_dist:
+            if self._best_tracker_source_for_sample() is None:
+                if not hasattr(self, '_last_known_residual_log_t') or (now-self._last_known_residual_log_t)>=30.0:
+                    self._last_known_residual_log_t = now
+                    self.get_logger().info(
+                        f'[CONVERGE_KNOWN_RESIDUAL] d_known={self._nearest_known_dist():.1f}m '
+                        'without new tracker candidate')
+                return False
         if now < self._pc_guard_t and self._nearest_known_dist() < self._pc_guard_near_dist:
             if not hasattr(self, '_last_guard_log_t') or (now-self._last_guard_log_t)>=30.0:
                 self._last_guard_log_t = now
@@ -1457,6 +1612,28 @@ class ControllerNode(Node):
     def _compute_departure_wp(self) -> Tuple[float, float]:
         cx, cy = self._sources_centroid()
         departure_min_d = max(4.5, self._excl_r + self._fr_safe_buf + 1.5)
+        expansion = self._source_set_expansion_target(departure_min_d)
+        if expansion is not None:
+            ring, gap_yaw, (cx, cy), source_set_label = expansion
+            tx, ty = ring[0], ring[1]
+            self._remember_coverage_yaw(tx, ty)
+            reason = ring[3] if len(ring) > 3 else 'source_set_expansion'
+            self.get_logger().info(
+                f'[DEPARTURE_WP/source_set/{reason}] centroid=({cx:.1f},{cy:.1f}) '
+                f'{source_set_label}={math.degrees(gap_yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
+                f'd_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
+            return (tx, ty)
+        best_ring = self._best_departure_ring(cx, cy, departure_min_d)
+        if best_ring is not None:
+            ring, yaw = best_ring
+            tx, ty = ring[0], ring[1]
+            self._remember_coverage_yaw(tx, ty)
+            reason = ring[3] if len(ring) > 3 else 'annular_coverage'
+            self.get_logger().info(
+                f'[DEPARTURE_WP/ring_multi/{reason}] centroid=({cx:.1f},{cy:.1f}) '
+                f'yaw={math.degrees(yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
+                f'd_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
+            return (tx, ty)
         sector = self._map_sector_yaw(
             min_d=departure_min_d,
             max_d=max(self._pc_min_d + 2.0, self._departure_dist),
@@ -1631,6 +1808,11 @@ class ControllerNode(Node):
             f'[→COARSE_SURVEY] reason={reason} '
             f'wp=({self._coarse_wp[0]:.1f},{self._coarse_wp[1]:.1f}) '
             f'd={math.hypot(self._coarse_wp[0]-self._wx,self._coarse_wp[1]-self._wy):.1f}m')
+        if reason == 'source_set_expansion' and self._source_set_direct_first_s > 0.0:
+            self._nav2_direct_until = now + self._source_set_direct_first_s
+            self._last_survey_pause_t = now + self._source_set_direct_first_s
+            self.get_logger().info(
+                f'[SOURCE_SET_DIRECT_FIRST] {self._source_set_direct_first_s:.0f}s before Nav2 retry and survey pause')
         # Attempt Nav2 goal; direct fallback guarantees movement if Nav2 fails
         self._send_nav2_goal(self._coarse_wp[0], self._coarse_wp[1])
 
@@ -1652,7 +1834,14 @@ class ControllerNode(Node):
         trise = self._temp_rise()
 
         # P1: Real-time thermal signal → switch to FINE gradient navigation
-        if self._calib_done and trise >= self._coarse_transit_thr and not self._is_near_known():
+        near_known_residual = (
+            self._found_sources
+            and self._nearest_known_dist() < self._pc_guard_near_dist
+            and self._best_tracker_source_for_sample() is None
+        )
+        if (self._calib_done and trise >= self._coarse_transit_thr
+                and not self._is_near_known()
+                and not near_known_residual):
             self._cancel_nav2_goal()
             self._state = STATE_FRONTIER_NAV; self._state_t = now
             self._search_rounds = 0; self._frontier_cold_start = None
@@ -2017,6 +2206,11 @@ class ControllerNode(Node):
                 moved=math.hypot(self._wx-self._move_start[0],self._wy-self._move_start[1])
                 if moved >= self._reloc_dist:
                     self._departure_wp = self._compute_departure_wp()
+                    if n_found >= self._source_set_expansion_min_sources:
+                        self._enter_coarse_survey(
+                            initial_wp=self._departure_wp,
+                            reason='source_set_expansion')
+                        return
                     self._state = STATE_DEPARTURE; self._state_t = now
                     self.get_logger().info(
                         f'[RELOCATE→DEPARTURE] moved={moved:.1f}m '

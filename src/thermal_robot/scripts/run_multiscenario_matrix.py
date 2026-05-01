@@ -38,11 +38,19 @@ REPRESENTATIVE_CASES = [
     MatrixCase("mixed_waypoint", WORLDS / "thermal_scene_mixed_rooms.world", SCENARIOS / "dynamic_waypoint_random_sources.yaml"),
 ]
 
+EXTENDED_CASES = [
+    *REPRESENTATIVE_CASES,
+    MatrixCase("zigzag_circular", WORLDS / "thermal_scene_zigzag_corridors.world", SCENARIOS / "dynamic_circular_sources.yaml"),
+    MatrixCase("islands_static_offset", WORLDS / "thermal_scene_sparse_islands.world", SCENARIOS / "static_offset_sources.yaml"),
+]
+
 FULL_WORLDS = [
     WORLDS / "thermal_scene_nav.world",
     WORLDS / "thermal_scene_obstacle_field.world",
     WORLDS / "thermal_scene_corridor_rooms.world",
     WORLDS / "thermal_scene_mixed_rooms.world",
+    WORLDS / "thermal_scene_zigzag_corridors.world",
+    WORLDS / "thermal_scene_sparse_islands.world",
 ]
 FULL_SCENARIOS = [
     CONFIG_B,
@@ -223,12 +231,14 @@ def select_cases(args: argparse.Namespace) -> List[MatrixCase]:
         return args.case
     if args.preset == "full":
         return _full_cases()
+    if args.preset == "extended":
+        return EXTENDED_CASES
     return REPRESENTATIVE_CASES
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=["representative", "full"], default="representative")
+    parser.add_argument("--preset", choices=["representative", "extended", "full"], default="representative")
     parser.add_argument("--case", type=_parse_case, action="append", help="name:world_file:scenario_file")
     parser.add_argument("--out-root", default="", help="default: /tmp/thermal_world_scenario_matrix_<timestamp>")
     parser.add_argument("--duration", type=float, default=90.0, help="collector duration per case")

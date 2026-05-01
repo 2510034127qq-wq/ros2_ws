@@ -560,7 +560,7 @@ class DataCollector(Node):
         """Evaluation-only radius scaled by source extent, not used by control."""
         truth_sigma = float((truth or {}).get('sigma', 0.0) or 0.0)
         estimate_sigma = float((estimate or {}).get('sigma', 0.0) or 0.0)
-        return max(1.5, 2.0 * truth_sigma, 2.0 * estimate_sigma)
+        return max(2.0, 2.0 * truth_sigma, 2.0 * estimate_sigma)
 
     def _truth_sources_snapshot(self) -> list:
         latest = {}

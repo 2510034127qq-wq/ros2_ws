@@ -21,7 +21,7 @@ class SourceTrackerNode(Node):
         self.declare_parameter('max_detections', 12)
         self.declare_parameter('gate_m', 1.25)
         self.declare_parameter('merge_radius_m', 1.0)
-        self.declare_parameter('duplicate_radius_m', 2.5)
+        self.declare_parameter('duplicate_radius_m', 3.5)
         self.declare_parameter('confirm_probability', 0.75)
         self.declare_parameter('confirm_observations', 5)
         self.declare_parameter('confirm_covariance_max', 0.9)
