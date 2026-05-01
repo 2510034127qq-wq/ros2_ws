@@ -48,7 +48,7 @@ import math
 import time
 import random
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
@@ -58,7 +58,12 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
                         QoSHistoryPolicy, QoSDurabilityPolicy)
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from thermal_interfaces.msg import GradientArray
+from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMap
+from thermal_motion_controller.planning import (
+    PlannerSource,
+    PlannerWeights,
+    select_information_gain_target,
+)
 
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ExtrapolationException, ConnectivityException
@@ -306,6 +311,14 @@ class ControllerNode(Node):
         self.declare_parameter('frontier_cold_timeout_s',    20.0)
         self.declare_parameter('departure_timeout_s',       120.0)
         self.declare_parameter('departure_speed',             0.22)
+        self.declare_parameter('planner_information_gain_weight', 1.0)
+        self.declare_parameter('planner_source_probability_weight', 1.4)
+        self.declare_parameter('planner_coverage_gain_weight', 0.7)
+        self.declare_parameter('planner_travel_cost_weight', 0.45)
+        self.declare_parameter('planner_duplicate_penalty_weight', 1.2)
+        self.declare_parameter('planner_risk_penalty_weight', 0.2)
+        self.declare_parameter('planner_map_stale_s', 5.0)
+        self.declare_parameter('planner_candidate_verify_radius', 3.5)
 
         # ── Read parameters ───────────────────────────────────────────────
         g = self.get_parameter
@@ -392,6 +405,16 @@ class ControllerNode(Node):
         self._frontier_cold_to    = float(g('frontier_cold_timeout_s').value)
         self._departure_timeout   = float(g('departure_timeout_s').value)
         self._departure_speed     = float(g('departure_speed').value)
+        self._planner_weights = PlannerWeights(
+            information_gain=float(g('planner_information_gain_weight').value),
+            source_probability=float(g('planner_source_probability_weight').value),
+            coverage_gain=float(g('planner_coverage_gain_weight').value),
+            travel_cost=float(g('planner_travel_cost_weight').value),
+            duplicate_penalty=float(g('planner_duplicate_penalty_weight').value),
+            risk_penalty=float(g('planner_risk_penalty_weight').value),
+        )
+        self._planner_map_stale_s = float(g('planner_map_stale_s').value)
+        self._candidate_verify_radius = float(g('planner_candidate_verify_radius').value)
 
         self._pre_pk_thresh = self._pre_pk_ratio * self._pk_tdelta
 
@@ -421,6 +444,10 @@ class ControllerNode(Node):
 
         # ── Perception ────────────────────────────────────────────────────
         self._last_ga: Optional[GradientArray] = None
+        self._thermal_map: Optional[Dict] = None
+        self._thermal_map_t: float = 0.0
+        self._tracker_sources: List[Dict] = []
+        self._tracker_sources_t: float = 0.0
         self._temp_win: deque = deque(maxlen=self._win_n)
         self._temp_max_seen = 25.0
         self._ang_smooth = 0.0
@@ -515,6 +542,8 @@ class ControllerNode(Node):
                          durability=QoSDurabilityPolicy.VOLATILE)
 
         self.create_subscription(GradientArray, '/thermal/gradient', self._grad_cb, rel)
+        self.create_subscription(ThermalMap,    '/thermal/map',      self._map_cb,  rel)
+        self.create_subscription(SourceEstimateArray, '/thermal/sources', self._sources_cb, rel)
         self.create_subscription(Odometry,      '/odom',             self._odom_cb, be)
         self._pub   = self.create_publisher(Twist, '/cmd_vel', 10)
         self._timer = self.create_timer(1.0/self._rate, self._timer_cb)
@@ -630,7 +659,12 @@ class ControllerNode(Node):
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
-        goal_msg.pose.header.stamp    = self.get_clock().now().to_msg()
+        # Gazebo/SLAM transforms in this workspace are stamped on the simulation
+        # clock even while use_sim_time defaults to false.  A wall-clock goal
+        # stamp makes Nav2 ask TF for an impossible future transform.  Stamp zero
+        # requests the latest available transform and keeps the default time
+        # policy unchanged.
+        goal_msg.pose.header.stamp    = rclpy.time.Time().to_msg()
         goal_msg.pose.pose.position.x = float(goal_map_x)
         goal_msg.pose.pose.position.y = float(goal_map_y)
         goal_msg.pose.pose.position.z = 0.0
@@ -735,7 +769,7 @@ class ControllerNode(Node):
                         f'[CALIB WARN] ambient={self._ambient_est:.1f}C > 30C, '
                         f'check if robot is already near heat source')
                 current_trise = T - self._ambient_est
-                if current_trise > 3.0:
+                if current_trise > 3.0 and self._thermal_map is None:
                     self._bmap.update(self._wx, self._wy,
                                       current_trise, heat_sigma=self._heat_sigma)
         else:
@@ -748,7 +782,7 @@ class ControllerNode(Node):
             self._temp_max_seen = T
         if self._calib_done and trise > _WARM_TEMP_DELTA:
             self._last_warm_pos = (self._wx, self._wy)
-        if self._calib_done:
+        if self._calib_done and self._thermal_map is None:
             self._bmap.update(self._wx, self._wy, trise, heat_sigma=self._heat_sigma)
         if self._state == STATE_CONVERGE:
             if T > self._converge_best_T:
@@ -763,6 +797,45 @@ class ControllerNode(Node):
                 self._T_max_unconf = T
         if self._state == STATE_SURVEY_PAUSE and self._survey_t_start is not None:
             self._survey_buf.append(T)
+
+    def _map_cb(self, msg: ThermalMap):
+        if msg.width == 0 or msg.height == 0:
+            return
+        try:
+            shape = (msg.height, msg.width)
+            self._thermal_map = {
+                'width': int(msg.width),
+                'height': int(msg.height),
+                'resolution': float(msg.resolution),
+                'origin_x': float(msg.origin_x),
+                'origin_y': float(msg.origin_y),
+                'temperature_variance': np.asarray(msg.temperature_variance, dtype=np.float32).reshape(shape),
+                'confidence': np.asarray(msg.confidence, dtype=np.float32).reshape(shape),
+                'visit_count': np.asarray(msg.visit_count, dtype=np.float32).reshape(shape),
+                'last_seen_age_s': np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape(shape),
+            }
+            self._thermal_map_t = time.monotonic()
+        except ValueError as exc:
+            if not hasattr(self, '_map_shape_warned'):
+                self._map_shape_warned = True
+                self.get_logger().warn(f'[THERMAL_MAP] bad shape: {exc}')
+
+    def _sources_cb(self, msg: SourceEstimateArray):
+        now = time.monotonic()
+        sources = []
+        for src in msg.sources:
+            sources.append({
+                'id': src.id,
+                'status': src.status,
+                'x': float(src.position.x),
+                'y': float(src.position.y),
+                'strength': float(src.strength),
+                'probability': float(src.existence_probability),
+                'confidence': float(src.confidence),
+                'observations': int(src.observations),
+            })
+        self._tracker_sources = sources
+        self._tracker_sources_t = now
 
     # ────────────────────────────────────────────────────────────────────────
     # Adaptive thresholds (unchanged)
@@ -838,6 +911,107 @@ class ControllerNode(Node):
     def _safe_dist(self):
         return self._excl_r + self._fr_safe_buf
 
+    def _map_available(self):
+        return (self._thermal_map is not None
+                and (time.monotonic() - self._thermal_map_t) <= self._planner_map_stale_s)
+
+    def _planner_sources(self):
+        now = time.monotonic()
+        if (now - self._tracker_sources_t) > self._planner_map_stale_s * 2.0:
+            return []
+        return [
+            PlannerSource(
+                x=s['x'],
+                y=s['y'],
+                probability=s['probability'],
+                status=s['status'],
+                confidence=s['confidence'],
+            )
+            for s in self._tracker_sources
+            if s['status'] in ('candidate', 'confirmed')
+            and not self._is_near_known_pos(s['x'], s['y'], radius=self._excl_r)
+        ]
+
+    def _is_near_known_pos(self, x, y, radius=None):
+        r = self._rev_r if radius is None else radius
+        return any(math.hypot(x-sx, y-sy) < r for sx, sy, _ in self._found_sources)
+
+    def _best_tracker_source_for_sample(self):
+        usable = [
+            s for s in self._tracker_sources
+            if s['status'] in ('candidate', 'confirmed')
+            and not self._is_near_known_pos(s['x'], s['y'], radius=self._excl_r)
+        ]
+        if not usable:
+            return None
+        usable.sort(
+            key=lambda s: (
+                0 if math.hypot(s['x']-self._wx, s['y']-self._wy) <= self._candidate_verify_radius else 1,
+                -s['probability'],
+                math.hypot(s['x']-self._wx, s['y']-self._wy),
+            )
+        )
+        best = usable[0]
+        if math.hypot(best['x']-self._wx, best['y']-self._wy) > max(self._candidate_verify_radius, self._excl_r * 2.0):
+            return None
+        return best
+
+    def _map_best_frontier(self, min_d=3.0, max_d=16.0, safe_dist=None):
+        if not self._map_available():
+            return None
+        m = self._thermal_map
+        target = select_information_gain_target(
+            robot_wx=self._wx,
+            robot_wy=self._wy,
+            width=m['width'],
+            height=m['height'],
+            resolution=m['resolution'],
+            origin_x=m['origin_x'],
+            origin_y=m['origin_y'],
+            temperature_variance=m['temperature_variance'],
+            confidence=m['confidence'],
+            visit_count=m['visit_count'],
+            last_seen_age_s=m['last_seen_age_s'],
+            source_estimates=self._planner_sources(),
+            known_sources=self._known_source_positions(),
+            min_d=min_d,
+            max_d=max_d,
+            safe_dist=self._safe_dist() if safe_dist is None else safe_dist,
+            weights=self._planner_weights,
+        )
+        if target is None:
+            return None
+        return target.x, target.y, target.score, target.reason
+
+    def _map_region_novelty(self, radius=5.0):
+        if not self._map_available():
+            return self._bmap.region_novelty(self._wx, self._wy, radius=radius)
+        m = self._thermal_map
+        h, w = m['height'], m['width']
+        yy, xx = np.mgrid[0:h, 0:w]
+        wx = m['origin_x'] + (xx.astype(np.float32) + 0.5) * m['resolution']
+        wy = m['origin_y'] + (yy.astype(np.float32) + 0.5) * m['resolution']
+        dist = np.sqrt((wx - self._wx)**2 + (wy - self._wy)**2)
+        mask = dist <= radius
+        if not mask.any():
+            return 0.0
+        visits = m['visit_count'][mask]
+        conf = m['confidence'][mask]
+        return float((0.6 / (1.0 + visits) + 0.4 * (1.0 - np.clip(conf, 0.0, 1.0))).mean())
+
+    def _novelty_at(self, wx, wy):
+        if self._map_available():
+            m = self._thermal_map
+            ix = int((wx - m['origin_x']) / m['resolution'])
+            iy = int((wy - m['origin_y']) / m['resolution'])
+            if 0 <= ix < m['width'] and 0 <= iy < m['height']:
+                visits = float(m['visit_count'][iy, ix])
+                conf = float(m['confidence'][iy, ix])
+                return 0.6 / (1.0 + visits) + 0.4 * (1.0 - max(0.0, min(1.0, conf)))
+            return 0.0
+        ci,cj=self._bmap._ci(wx,wy)
+        return 1.0/(1.0+float(self._bmap.visit[ci,cj]))
+
     def _escape_yaw(self):
         if self._found_sources:
             vx,vy=self._repulsion_vec()
@@ -846,12 +1020,14 @@ class ControllerNode(Node):
             rep_yaw=math.atan2(-math.sin(self._odom_yaw),
                                -math.cos(self._odom_yaw))
         if self._esc_fr_bias>0.0:
-            frontier=self._bmap.best_frontier(
-                self._wx,self._wy,min_d=4.0,max_d=14.0,
-                known_sources=self._known_source_positions(),
-                safe_dist=self._safe_dist())
+            frontier=self._map_best_frontier(min_d=4.0,max_d=14.0,safe_dist=self._safe_dist())
+            if frontier is None:
+                frontier=self._bmap.best_frontier(
+                    self._wx,self._wy,min_d=4.0,max_d=14.0,
+                    known_sources=self._known_source_positions(),
+                    safe_dist=self._safe_dist())
             if frontier is not None:
-                fx,fy,_=frontier
+                fx,fy=frontier[0],frontier[1]
                 fr_yaw=math.atan2(fy-self._wy,fx-self._wx)
                 w=self._esc_fr_bias
                 rx=(1.0-w)*math.cos(rep_yaw)+w*math.cos(fr_yaw)
@@ -1020,20 +1196,25 @@ class ControllerNode(Node):
             mode_str=f'BOOST min_d={min_d:.1f}m'
         else:
             min_d=3.0; d_sig=8.0; mode_str='NORMAL'
-        ft=self._bmap.best_frontier(self._wx,self._wy,min_d=min_d,max_d=16.0,
-            dist_sigma=d_sig,known_sources=ksrc,safe_dist=self._safe_dist())
+        ft=self._map_best_frontier(min_d=min_d,max_d=16.0,safe_dist=self._safe_dist())
+        if ft is None:
+            ft=self._bmap.best_frontier(self._wx,self._wy,min_d=min_d,max_d=16.0,
+                dist_sigma=d_sig,known_sources=ksrc,safe_dist=self._safe_dist())
         if ft is not None:
-            fx,fy,sc=ft; self._frontier_target=(fx,fy)
+            fx,fy,sc=ft[0],ft[1],ft[2]; self._frontier_target=(fx,fy)
+            reason=ft[3] if len(ft)>3 else 'belief_fallback'
             self.get_logger().info(
-                f'[FRONTIER/{mode_str}] →({fx:.1f},{fy:.1f}) score={sc:.3f} '
+                f'[FRONTIER/{mode_str}/{reason}] →({fx:.1f},{fy:.1f}) score={sc:.3f} '
                 f'd={math.hypot(fx-self._wx,fy-self._wy):.1f}m')
         else:
             self._do_levy_jump(now)
 
     def _do_levy_jump(self, now):
         step=self._levy_step(); ksrc=self._known_source_positions()
-        ft=self._bmap.best_frontier(self._wx,self._wy,min_d=step*0.4,max_d=step*1.6,
-            known_sources=ksrc,safe_dist=self._safe_dist())
+        ft=self._map_best_frontier(min_d=step*0.4,max_d=step*1.6,safe_dist=self._safe_dist())
+        if ft is None:
+            ft=self._bmap.best_frontier(self._wx,self._wy,min_d=step*0.4,max_d=step*1.6,
+                known_sources=ksrc,safe_dist=self._safe_dist())
         direction=(math.atan2(ft[1]-self._wy,ft[0]-self._wx)
                    if ft is not None else random.uniform(-math.pi,math.pi))
         lx=self._wx+step*math.cos(direction); ly=self._wy+step*math.sin(direction)
@@ -1075,8 +1256,7 @@ class ControllerNode(Node):
             for frac in (0.4,0.65,0.85,1.0):
                 px=cx+self._departure_dist*frac*math.cos(yaw)
                 py=cy+self._departure_dist*frac*math.sin(yaw)
-                ci,cj=self._bmap._ci(px,py)
-                nov=1.0/(1.0+float(self._bmap.visit[ci,cj]))
+                nov=self._novelty_at(px,py)
                 src_ok=1.0
                 if self._found_sources:
                     min_src_d=min(math.hypot(px-sx,py-sy) for sx,sy,_ in self._found_sources)
@@ -1125,10 +1305,15 @@ class ControllerNode(Node):
 
     def _coarse_waypoint(self):
         ksrc=self._known_source_positions()
-        ft=self._bmap.best_frontier(self._wx,self._wy,
-            min_d=self._survey_wp_min_d,max_d=self._survey_wp_max_d,
-            dist_sigma=10.0,heat_prior=0.0,
-            known_sources=ksrc,safe_dist=self._survey_safe_dist)
+        ft=self._map_best_frontier(
+            min_d=self._survey_wp_min_d,
+            max_d=self._survey_wp_max_d,
+            safe_dist=self._survey_safe_dist)
+        if ft is None:
+            ft=self._bmap.best_frontier(self._wx,self._wy,
+                min_d=self._survey_wp_min_d,max_d=self._survey_wp_max_d,
+                dist_sigma=10.0,heat_prior=0.0,
+                known_sources=ksrc,safe_dist=self._survey_safe_dist)
         return (ft[0],ft[1]) if ft is not None else None
 
     def _enter_coarse_survey(self, initial_wp=None, reason='unknown'):
@@ -1376,18 +1561,25 @@ class ControllerNode(Node):
     def _exec_sample(self, now):
         T=self._current_temp(); self._sample_T_buf.append(T); self._pub.publish(Twist())
         if self._check_peak_sample_v22(now):
-            if not self._is_near_known():
-                self._found_sources.append((self._wx,self._wy,T))
+            est = self._best_tracker_source_for_sample()
+            if est is not None:
+                sx, sy = est['x'], est['y']
+            else:
+                sx = sy = None
+            if est is not None and not self._is_near_known_pos(sx, sy, radius=self._excl_r):
+                self._found_sources.append((sx,sy,T))
                 self._last_found_t=now; self._esc_loop_count=0
-                self._bmap.mark_excluded(self._wx,self._wy,self._excl_r)
-                self._bmap.suppress_confirmed_source(self._wx,self._wy,self._excl_r+1.0)
+                self._bmap.mark_excluded(sx,sy,self._excl_r)
+                self._bmap.suppress_confirmed_source(sx,sy,self._excl_r+1.0)
                 self._peak_armed=False; self._state=STATE_AT_PEAK; self._state_t=now
                 self._converge_center=None
                 kstr=', '.join(f'({s[0]:.1f},{s[1]:.1f})' for s in self._found_sources)
                 elapsed=now-self._t0
                 self.get_logger().info(
                     f'★ [SOURCE #{len(self._found_sources)}] '
-                    f'pos=({self._wx:.2f},{self._wy:.2f}) T={T:.1f}C '
+                    f'est={est["id"]} pos=({sx:.2f},{sy:.2f}) '
+                    f'p={est["probability"]:.2f} obs={est["observations"]} '
+                    f'T={T:.1f}C robot=({self._wx:.2f},{self._wy:.2f}) '
                     f'path={self._path_length:.2f}m t={elapsed:.1f}s')
                 self.get_logger().info(f'  Known sources: [{kstr}]')
                 self._conv_sticky_count=0; self._conv_best_global_T=0.0
@@ -1398,6 +1590,10 @@ class ControllerNode(Node):
                     f'[CONVERGE_GUARD_SET] block CONVERGE for {self._pc_cooldown_s:.0f}s')
                 self._pc_rounds_left=self._pc_rounds
             else:
+                if est is None:
+                    self.get_logger().warn(
+                        '[SAMPLE→FRONTIER] thermal peak passed but no tracker source estimate '
+                        'is close enough to confirm')
                 self._state=STATE_FRONTIER_NAV; self._state_t=now
                 self._refresh_frontier(now,force=True)
         elif self._sample_t_start and (now-self._sample_t_start)>=self._sample_hold:
@@ -1604,7 +1800,7 @@ class ControllerNode(Node):
 
         # Lévy flight when region is exhausted
         if self._search_rounds >= self._levy_rnd_thr and self._peak_cand_t is None:
-            nov = self._bmap.region_novelty(self._wx, self._wy, radius=5.0)
+            nov = self._map_region_novelty(radius=5.0)
             if nov < self._levy_nov_thr:
                 self._do_levy_jump(now)
 
@@ -1638,7 +1834,7 @@ class ControllerNode(Node):
         if int(elapsed*self._rate) % 50 == 0:
             ft = (f'({self._frontier_target[0]:.1f},{self._frontier_target[1]:.1f})'
                   if self._frontier_target else 'None')
-            nov = self._bmap.region_novelty(self._wx, self._wy)
+            nov = self._map_region_novelty()
             guard_r = max(0, self._pc_guard_t - now)
             cold_t = (now - self._frontier_cold_start) if self._frontier_cold_start else 0.0
             self.get_logger().info(

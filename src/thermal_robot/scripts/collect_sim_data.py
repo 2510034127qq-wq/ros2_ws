@@ -35,6 +35,7 @@ v3 新增（相比 v2）：
 """
 
 import csv
+import argparse
 import json
 import math
 import os
@@ -54,7 +55,7 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path as NavPath
 from sensor_msgs.msg import Image, LaserScan
-from thermal_interfaces.msg import ThermalField, GradientArray
+from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalField, ThermalMap
 
 # TF2
 try:
@@ -100,6 +101,7 @@ class DataCollector(Node):
         super().__init__('sim_data_collector')
         self._t0 = time.monotonic()
         self._out = out_dir
+        self._saved = False
         (self._out / 'snapshots').mkdir(parents=True, exist_ok=True)
 
         # ── 数据缓冲区 ──────────────────────────────────────────────────────
@@ -107,7 +109,11 @@ class DataCollector(Node):
         self._slam_traj:   list = []   # SLAM(map frame)轨迹 [v3]
         self._th_stats:    list = []   # 热像统计
         self._field_stats: list = []   # 热场统计
+        self._map_stats:   list = []   # world thermal map统计
         self._grad_stats:  list = []   # 梯度统计
+        self._sources:     list = []   # tracker source estimates
+        self._truth:       list = []   # simulator source truth
+        self._source_events: list = []
         self._cmdvel:      list = []   # 速度指令
         self._scan_stats:  list = []   # 激光扫描统计 [v3]
         self._plan_stats:  list = []   # Nav2规划路径统计 [v3]
@@ -130,6 +136,9 @@ class DataCollector(Node):
             '/sim/thermal_raw':   [],
             '/thermal/filtered':  [],
             '/thermal/field':     [],
+            '/thermal/map':       [],
+            '/thermal/sources':   [],
+            '/sim/thermal_sources_truth': [],
             '/thermal/gradient':  [],
             '/cmd_vel':           [],
             '/scan':              [],   # [v3]
@@ -139,6 +148,7 @@ class DataCollector(Node):
         # 最新帧缓存
         self._latest_raw:  np.ndarray | None = None
         self._latest_filt: np.ndarray | None = None
+        self._last_source_status: dict = {}
 
         # ── [v3] TF2 监听器（SLAM位姿） ─────────────────────────────────────
         if TF2_AVAILABLE:
@@ -154,6 +164,9 @@ class DataCollector(Node):
         self.create_subscription(Image,        '/sim/thermal_raw',  self._raw_cb,    BE_QOS)
         self.create_subscription(Image,        '/thermal/filtered', self._filt_cb,   BE_QOS)
         self.create_subscription(ThermalField, '/thermal/field',    self._field_cb,  RE_QOS)
+        self.create_subscription(ThermalMap,   '/thermal/map',      self._map_cb,    RE_QOS)
+        self.create_subscription(SourceEstimateArray, '/thermal/sources', self._sources_cb, RE_QOS)
+        self.create_subscription(SourceEstimateArray, '/sim/thermal_sources_truth', self._truth_cb, BE_QOS)
         self.create_subscription(GradientArray,'/thermal/gradient', self._grad_cb,   RE_QOS)
         self.create_subscription(Twist,        '/cmd_vel',          self._cmd_cb,    BE_QOS)
         # [v3] 新增订阅
@@ -165,7 +178,7 @@ class DataCollector(Node):
             self.create_timer(0.1, self._tf_poll_cb)
 
         self.get_logger().info(
-            f'[collector v3] 已订阅 8 个话题（含 /scan, /plan），输出→ {out_dir}')
+            f'[collector v3] 已订阅 12 个话题（含 /scan, /plan, map/sources/truth），输出→ {out_dir}')
         self.get_logger().info('[collector v3] Ctrl+C 停止并保存数据')
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -308,6 +321,69 @@ class DataCollector(Node):
             rec[f'hs{i}_conf'] = float(h.confidence)
         self._field_stats.append(rec)
 
+    def _map_cb(self, msg: ThermalMap):
+        t = self._ts()
+        self._record_rate('/thermal/map', t)
+        if msg.width == 0 or msg.height == 0:
+            return
+        temp = np.asarray(msg.temperature_mean, dtype=np.float32)
+        conf = np.asarray(msg.confidence, dtype=np.float32)
+        visits = np.asarray(msg.visit_count, dtype=np.float32)
+        seen = conf > 0.01
+        hot = temp > 26.0
+        self._map_stats.append({
+            't': t,
+            'width': int(msg.width),
+            'height': int(msg.height),
+            'resolution': float(msg.resolution),
+            'seen_ratio': float(seen.mean()) if seen.size else 0.0,
+            'mean_confidence': float(conf[seen].mean()) if np.any(seen) else 0.0,
+            'max_temp': float(temp.max()) if temp.size else 0.0,
+            'hot_cells': int(np.count_nonzero(hot & seen)),
+            'visited_cells': int(np.count_nonzero(visits > 0)),
+        })
+
+    def _sources_cb(self, msg: SourceEstimateArray):
+        t = self._ts()
+        self._record_rate('/thermal/sources', t)
+        for src in msg.sources:
+            rec = self._source_record(t, src)
+            self._sources.append(rec)
+            key = src.id
+            prev = self._last_source_status.get(key)
+            if prev != src.status:
+                self._source_events.append({
+                    't': t,
+                    'id': src.id,
+                    'from_status': prev or '',
+                    'to_status': src.status,
+                    'x': float(src.position.x),
+                    'y': float(src.position.y),
+                    'probability': float(src.existence_probability),
+                    'observations': int(src.observations),
+                })
+                self._last_source_status[key] = src.status
+
+    def _truth_cb(self, msg: SourceEstimateArray):
+        t = self._ts()
+        self._record_rate('/sim/thermal_sources_truth', t)
+        for src in msg.sources:
+            self._truth.append(self._source_record(t, src))
+
+    def _source_record(self, t: float, src):
+        return {
+            't': t,
+            'id': src.id,
+            'status': src.status,
+            'x': float(src.position.x),
+            'y': float(src.position.y),
+            'strength': float(src.strength),
+            'sigma': float(src.sigma),
+            'probability': float(src.existence_probability),
+            'confidence': float(src.confidence),
+            'observations': int(src.observations),
+        }
+
     def _grad_cb(self, msg: GradientArray):
         t = self._ts()
         self._record_rate('/thermal/gradient', t)
@@ -396,11 +472,84 @@ class DataCollector(Node):
             'goal_y':       float(poses[-1].pose.position.y) if n_pts>0 else float('nan'),
         })
 
+    def _source_level_summary(self, duration: float) -> dict:
+        truth_latest = {}
+        for rec in self._truth:
+            if rec['status'] == 'truth_active':
+                truth_latest[rec['id']] = rec
+        if not truth_latest:
+            for src in CONFIG_B_SOURCES:
+                truth_latest[src['name']] = {
+                    'id': src['name'],
+                    'x': src['xy'][0],
+                    'y': src['xy'][1],
+                    'status': 'truth_active',
+                }
+
+        confirmed = {}
+        first_confirm_t = {}
+        for rec in self._sources:
+            if rec['status'] != 'confirmed':
+                continue
+            confirmed[rec['id']] = rec
+            first_confirm_t.setdefault(rec['id'], rec['t'])
+
+        matches = []
+        used_est = set()
+        for tid, truth in truth_latest.items():
+            best_id = None
+            best_d = float('inf')
+            for eid, est in confirmed.items():
+                if eid in used_est:
+                    continue
+                d = math.hypot(est['x'] - truth['x'], est['y'] - truth['y'])
+                if d < best_d:
+                    best_id = eid
+                    best_d = d
+            if best_id is not None and best_d <= 1.5:
+                used_est.add(best_id)
+                matches.append({
+                    'truth_id': tid,
+                    'estimate_id': best_id,
+                    'error_m': round(best_d, 3),
+                    'time_s': round(first_confirm_t.get(best_id, confirmed[best_id]['t']), 3),
+                })
+
+        truth_count = len(truth_latest)
+        confirmed_count = len(confirmed)
+        recall = len(matches) / max(1, truth_count)
+        precision = len(matches) / max(1, confirmed_count)
+        times = [m['time_s'] for m in matches]
+        duplicate_confirmations = max(0, confirmed_count - len(matches))
+        path_length = 0.0
+        if len(self._traj) > 1:
+            for a, b in zip(self._traj, self._traj[1:]):
+                path_length += math.hypot(b['wx'] - a['wx'], b['wy'] - a['wy'])
+        return {
+            'source_recall': round(recall, 3),
+            'source_precision': round(precision, 3),
+            'time_to_first_source': min(times) if times else None,
+            'time_to_all_sources': max(times) if len(matches) == truth_count and times else None,
+            'localization_errors_m': matches,
+            'duplicate_confirmations': duplicate_confirmations,
+            'path_length_m': round(path_length, 3),
+            'nav2_goal_proxy': {
+                'plans_observed': self._nav2_plan_count,
+                'accepted': None,
+                'succeeded': None,
+                'failed': None,
+            },
+            'duration_s': round(duration, 3),
+        }
+
     # ──────────────────────────────────────────────────────────────────────────
     # 保存
     # ──────────────────────────────────────────────────────────────────────────
 
     def save(self):
+        if self._saved:
+            return
+        self._saved = True
         out = self._out
         duration = self._ts()
         print(f'\n[collector v3] 正在保存数据，运行时长 {duration:.1f}s ...')
@@ -421,7 +570,11 @@ class DataCollector(Node):
         write_csv('slam_trajectory.csv', self._slam_traj)   # [v3]
         write_csv('thermal_stats.csv',   self._th_stats)
         write_csv('field_stats.csv',     self._field_stats)
+        write_csv('thermal_map_stats.csv', self._map_stats)
         write_csv('gradient_stats.csv',  self._grad_stats)
+        write_csv('source_estimates.csv', self._sources)
+        write_csv('thermal_sources_truth.csv', self._truth)
+        write_csv('source_events.csv', self._source_events)
         write_csv('cmd_vel.csv',         self._cmdvel)
         write_csv('scan_stats.csv',      self._scan_stats)  # [v3]
         write_csv('nav2_plan_stats.csv', self._plan_stats)  # [v3]
@@ -458,7 +611,11 @@ class DataCollector(Node):
                 'slam_traj':     len(self._slam_traj),
                 'thermal_stats': len(self._th_stats),
                 'field_stats':   len(self._field_stats),
+                'map_stats':     len(self._map_stats),
                 'grad_stats':    len(self._grad_stats),
+                'source_estimates': len(self._sources),
+                'truth_sources':  len(self._truth),
+                'source_events':  len(self._source_events),
                 'cmd_vel':       len(self._cmdvel),
                 'scan_stats':    len(self._scan_stats),
                 'nav2_plans':    len(self._plan_stats),
@@ -473,11 +630,16 @@ class DataCollector(Node):
         with open(out / 'metadata.json', 'w') as f:
             json.dump(meta, f, indent=2)
         print('  ✓ metadata.json')
+        summary = self._source_level_summary(duration)
+        with open(out / 'source_summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+        print('  ✓ source_summary.json')
         print(f'  ✓ snapshots/ ({self._snap_count} 对)')
 
         # [v3] 打印 SLAM/Nav2 汇总
+        slam_first = f'{self._slam_first_t:.1f}s' if self._slam_first_t is not None else 'N/A'
         print(f'\n  [SLAM] 可用={self._slam_available} '
-              f'首次就绪={self._slam_first_t:.1f}s '
+              f'首次就绪={slam_first} '
               f'位姿数={self._slam_pos_count}')
         print(f'  [Nav2] 可用={self._nav2_available} '
               f'规划次数={self._nav2_plan_count}')
@@ -491,11 +653,16 @@ class DataCollector(Node):
 # ─── 入口 ────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--out-dir', default='', help='output directory; default is bags/collected/<timestamp>')
+    parser.add_argument('--duration', type=float, default=0.0, help='seconds to collect before saving and exiting')
+    args = parser.parse_args()
+
     ts      = datetime.now().strftime('%Y%m%d_%H%M%S')
-    out_dir = OUTBASE / ts
+    out_dir = Path(args.out_dir).expanduser() if args.out_dir else OUTBASE / ts
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f'[collector v3] 输出目录：{out_dir}')
-    print(f'[collector v3] SLAM+Nav2 版：额外记录 /scan, /plan, TF(map→base_link)')
+    print(f'[collector v3] SLAM+Nav2 版：额外记录 /scan, /plan, /thermal/map, /thermal/sources, truth')
 
     rclpy.init()
     node = DataCollector(out_dir)
@@ -514,7 +681,12 @@ def main():
     signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        rclpy.spin(node)
+        if args.duration > 0.0:
+            deadline = time.monotonic() + args.duration
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.1)
+        else:
+            rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:

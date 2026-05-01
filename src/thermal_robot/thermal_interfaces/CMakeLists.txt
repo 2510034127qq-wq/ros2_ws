@@ -10,8 +10,11 @@ find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ThermalPoint.msg"
   "msg/ThermalField.msg"
+  "msg/ThermalMap.msg"
   "msg/Gradient.msg"
   "msg/GradientArray.msg"
+  "msg/SourceEstimate.msg"
+  "msg/SourceEstimateArray.msg"
   "srv/GetFieldInfo.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )

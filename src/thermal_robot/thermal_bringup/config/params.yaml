@@ -21,6 +21,7 @@ sensor_node:
     noise_std:     0.5
     random_seed:   42
     num_sources:   3
+    scenario_file: ""
 
 preprocessor_node:
   ros__parameters:
@@ -45,11 +46,42 @@ reconstructor_node:
     hotspot_max_count:      5
     hotspot_min_distance:   5
 
+thermal_mapper_node:
+  ros__parameters:
+    publish_rate:       5.0
+    frame_id:           "world"
+    spawn_x:           -6.0
+    spawn_y:            0.0
+    map_size_x_m:      50.0
+    map_size_y_m:      50.0
+    map_resolution:     0.25
+    sensor_fov_x:       4.0
+    sensor_fov_y:       3.0
+    ambient_temp:      22.0
+    confidence_visit_scale: 6.0
+    age_decay_s:       45.0
+    unknown_variance: 100.0
+
 gradient_node:
   ros__parameters:
     method:             "sobel"
     subsample_stride:   4
     frame_id:           "thermal_camera"
+
+source_tracker_node:
+  ros__parameters:
+    ambient_temp:             22.0
+    min_temp_rise:             4.0
+    min_confidence:            0.12
+    max_detections:           12
+    gate_m:                    1.25
+    merge_radius_m:            1.0
+    duplicate_radius_m:        2.0
+    confirm_probability:       0.75
+    confirm_observations:      5
+    confirm_covariance_max:    0.9
+    stale_after_s:            12.0
+    stale_decay_s:            20.0
 
 controller_node:
   ros__parameters:
@@ -123,3 +155,13 @@ controller_node:
     sample_center_pixel_radius: 12
     sample_hold_s:       3.0
     sample_min_trise:    8.0
+
+    # ── World-map information-gain planner ─────────────────────────────────
+    planner_information_gain_weight:       1.0
+    planner_source_probability_weight:     1.4
+    planner_coverage_gain_weight:          0.7
+    planner_travel_cost_weight:            0.45
+    planner_duplicate_penalty_weight:      1.2
+    planner_risk_penalty_weight:           0.2
+    planner_map_stale_s:                   5.0
+    planner_candidate_verify_radius:       3.5

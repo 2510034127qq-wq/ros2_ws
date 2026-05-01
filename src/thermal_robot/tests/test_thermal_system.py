@@ -30,7 +30,23 @@ import time
 import math
 import unittest
 import numpy as np
+from pathlib import Path
 from typing import Tuple, List, Dict
+
+WORKSPACE = Path(__file__).resolve().parents[3]
+for rel in [
+    'src/thermal_robot/thermal_sensor_sim',
+    'src/thermal_robot/thermal_field_reconstructor',
+    'src/thermal_robot/thermal_motion_controller',
+]:
+    path = str(WORKSPACE / rel)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
+from thermal_motion_controller.planning import PlannerSource, select_information_gain_target
+from thermal_motion_controller.source_tracking import SourceDetection, SourceTrackerCore
+from thermal_sensor_sim.scenario import default_config_b_scenario, load_scenario_file
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -286,6 +302,85 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertGreater(mean_cos, 0.85,
             f"Sobel vs central-diff direction cos similarity should >0.85, got {mean_cos:.3f}")
 
+    def test_T_PY9_config_b_yaml_matches_fallback(self):
+        """T-PY9: 默认 Config-B YAML 与空 scenario_file fallback 等价."""
+        fallback = default_config_b_scenario(num_sources=3)
+        yaml_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/config_b_sources.yaml'
+        loaded = load_scenario_file(str(yaml_path), num_sources=3)
+        self.assertEqual(len(loaded.sources), len(fallback.sources))
+        for a, b in zip(loaded.sources, fallback.sources):
+            self.assertEqual(a.source_id, b.source_id)
+            self.assertAlmostEqual(a.world_x, b.world_x)
+            self.assertAlmostEqual(a.world_y, b.world_y)
+            self.assertAlmostEqual(a.amplitude, b.amplitude)
+            self.assertAlmostEqual(a.sigma_m, b.sigma_m)
+
+    def test_T_PY10_world_mapper_hotspot_projection(self):
+        """T-PY10: FOV 像素投影到 world grid 后热点坐标误差 <0.75m."""
+        robot_x, robot_y, yaw = -6.0, 0.0, 0.0
+        source_x, source_y = -5.0, 0.5
+        W, H = 64, 48
+        px_xs = np.linspace(-2.0, 2.0, W, dtype=np.float32)
+        px_ys = np.linspace(-1.5, 1.5, H, dtype=np.float32)
+        xx, yy = np.meshgrid(px_xs, px_ys)
+        world_x = robot_x + xx
+        world_y = robot_y + yy
+        image = 22.0 + 35.0 * np.exp(-((world_x-source_x)**2 + (world_y-source_y)**2) / (2.0 * 0.45**2))
+        grid = WorldThermalGrid(center_x=-6.0, center_y=0.0, size_x_m=12.0, size_y_m=12.0, resolution=0.25)
+        grid.integrate_image(image.astype(np.float32), robot_x, robot_y, yaw, stamp_s=1.0, fov_x=4.0, fov_y=3.0)
+        snap = grid.snapshot(now_s=1.0)
+        iy, ix = np.unravel_index(np.argmax(snap.temperature_mean), snap.temperature_mean.shape)
+        est_x = snap.origin_x + (ix + 0.5) * snap.resolution
+        est_y = snap.origin_y + (iy + 0.5) * snap.resolution
+        self.assertLess(math.hypot(est_x-source_x, est_y-source_y), 0.75)
+
+    def test_T_PY11_tracker_confirms_and_merges_duplicate(self):
+        """T-PY11: tracker 连续观测确认同一源，近距离重复候选不会重复 confirmed."""
+        tracker = SourceTrackerCore(confirm_observations=5, confirm_covariance_max=1.0)
+        for i in range(6):
+            tracker.update([
+                SourceDetection(x=1.0, y=2.0, strength=18.0, confidence=0.9),
+                SourceDetection(x=1.25, y=2.1, strength=17.0, confidence=0.85),
+            ], now_s=float(i))
+        confirmed = [t for t in tracker.tracks if t.status == 'confirmed']
+        self.assertEqual(len(confirmed), 1)
+        self.assertGreaterEqual(confirmed[0].existence_probability, 0.75)
+
+    def test_T_PY12_tracker_stale_decay(self):
+        """T-PY12: source 无观测后概率衰减并进入 stale."""
+        tracker = SourceTrackerCore(confirm_observations=5, stale_after_s=2.0, stale_decay_s=2.0)
+        tracker.update([SourceDetection(0.0, 0.0, 12.0, 0.8)], now_s=0.0)
+        p0 = tracker.tracks[0].existence_probability
+        tracker.update([], now_s=4.0)
+        track = tracker.tracks[0]
+        self.assertEqual(track.status, 'stale')
+        self.assertLess(track.existence_probability, p0)
+
+    def test_T_PY13_information_gain_prefers_candidate_verification(self):
+        """T-PY13: 信息增益 planner 会优先选 candidate source 周边验证点."""
+        width = height = 40
+        variance = np.ones((height, width), dtype=np.float32)
+        confidence = np.full((height, width), 0.2, dtype=np.float32)
+        visits = np.zeros((height, width), dtype=np.float32)
+        age = np.full((height, width), 10.0, dtype=np.float32)
+        candidate = PlannerSource(x=2.0, y=1.0, probability=0.9, status='candidate', confidence=0.9)
+        target = select_information_gain_target(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=0.25,
+            origin_x=-5.0, origin_y=-5.0,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            source_estimates=[candidate],
+            known_sources=[],
+            min_d=1.0,
+            max_d=6.0,
+        )
+        self.assertIsNotNone(target)
+        self.assertEqual(target.reason, 'source_verify')
+        self.assertLess(math.hypot(target.x-candidate.x, target.y-candidate.y), 2.0)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  T-ALG: 算法性能基准（用于答辩数据）
@@ -383,7 +478,7 @@ def run_ros_integration_tests():
     from sensor_msgs.msg import Image, JointState
     from geometry_msgs.msg import Twist
     from nav_msgs.msg import Odometry
-    from thermal_interfaces.msg import ThermalField, GradientArray
+    from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalField, ThermalMap
     from thermal_interfaces.srv import GetFieldInfo
 
     rclpy.init()
@@ -393,8 +488,8 @@ def run_ros_integration_tests():
         def __init__(self):
             super().__init__('thermal_tester_v2')
             self.msgs = {k: [] for k in [
-                'raw', 'filtered', 'field', 'gradient', 'cmd_vel',
-                'odom', 'joint_states'
+                'raw', 'filtered', 'field', 'map', 'sources', 'truth',
+                'gradient', 'cmd_vel', 'odom', 'joint_states'
             ]}
             from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
             be = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -404,6 +499,9 @@ def run_ros_integration_tests():
             self.create_subscription(Image,        '/sim/thermal_raw',     lambda m: self.msgs['raw'].append(m),        be)
             self.create_subscription(Image,        '/thermal/filtered',    lambda m: self.msgs['filtered'].append(m),   be)
             self.create_subscription(ThermalField, '/thermal/field',       lambda m: self.msgs['field'].append(m),      re)
+            self.create_subscription(ThermalMap,   '/thermal/map',         lambda m: self.msgs['map'].append(m),        re)
+            self.create_subscription(SourceEstimateArray, '/thermal/sources', lambda m: self.msgs['sources'].append(m), re)
+            self.create_subscription(SourceEstimateArray, '/sim/thermal_sources_truth', lambda m: self.msgs['truth'].append(m), be)
             self.create_subscription(GradientArray,'/thermal/gradient',    lambda m: self.msgs['gradient'].append(m),   re)
             self.create_subscription(Twist,        '/cmd_vel',             lambda m: self.msgs['cmd_vel'].append(m),    re)
             self.create_subscription(Odometry,     '/odom',                lambda m: self.msgs['odom'].append(m),       be)
@@ -450,6 +548,24 @@ def run_ros_integration_tests():
     results['T_ROS5_gradient'] = {
         'pass':  len(node.msgs['gradient']) > 3,
         'value': f'{len(node.msgs["gradient"])} msgs in {dt:.0f}s'
+    }
+
+    # T-ROS-5b: world thermal map
+    results['T_ROS5b_thermal_map'] = {
+        'pass':  len(node.msgs['map']) > 1,
+        'value': f'{len(node.msgs["map"])} msgs in {dt:.0f}s'
+    }
+
+    # T-ROS-5c: source tracker estimates
+    results['T_ROS5c_sources'] = {
+        'pass':  len(node.msgs['sources']) > 1,
+        'value': f'{len(node.msgs["sources"])} msgs in {dt:.0f}s'
+    }
+
+    # T-ROS-5d: simulator truth topic
+    results['T_ROS5d_truth'] = {
+        'pass':  len(node.msgs['truth']) > 1,
+        'value': f'{len(node.msgs["truth"])} msgs in {dt:.0f}s'
     }
 
     # T-ROS-6: 控制指令

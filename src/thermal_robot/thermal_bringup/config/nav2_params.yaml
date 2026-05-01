@@ -236,12 +236,17 @@ global_costmap:
       robot_base_frame: base_link
       use_sim_time: false
       robot_radius: 0.25
-      resolution: 0.05
-      track_unknown_space: true       # 追踪未知空间（热搜索必须）
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
+      rolling_window: true
+      width: 60
+      height: 60
+      resolution: 0.10
+      track_unknown_space: false
+      # SLAM Toolbox may publish very small early maps during startup.  A static
+      # global layer then shrinks Nav2's costmap around the initial SLAM map and
+      # marks the robot out-of-bounds.  The controller already owns global
+      # exploration targets, so Nav2 only needs local obstacle/inflation checks
+      # over a large rolling map-frame window.
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true

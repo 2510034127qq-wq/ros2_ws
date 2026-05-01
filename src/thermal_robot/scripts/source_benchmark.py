@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Compute source-level benchmark metrics from a collector output directory."""
+
+import argparse
+import csv
+import json
+import math
+from pathlib import Path
+
+
+def read_csv(path):
+    if not path.exists():
+        return []
+    with open(path, newline='') as f:
+        return list(csv.DictReader(f))
+
+
+def as_float(row, key, default=0.0):
+    try:
+        return float(row.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def compute(run_dir: Path) -> dict:
+    truth_rows = read_csv(run_dir / 'thermal_sources_truth.csv')
+    estimate_rows = read_csv(run_dir / 'source_estimates.csv')
+    traj_rows = read_csv(run_dir / 'trajectory.csv')
+
+    truth_latest = {}
+    for row in truth_rows:
+        if row.get('status') == 'truth_active':
+            truth_latest[row['id']] = row
+    confirmed = {}
+    first_t = {}
+    for row in estimate_rows:
+        if row.get('status') != 'confirmed':
+            continue
+        confirmed[row['id']] = row
+        first_t.setdefault(row['id'], as_float(row, 't'))
+
+    matches = []
+    used = set()
+    for tid, truth in truth_latest.items():
+        best_id = None
+        best_d = float('inf')
+        tx, ty = as_float(truth, 'x'), as_float(truth, 'y')
+        for eid, est in confirmed.items():
+            if eid in used:
+                continue
+            d = math.hypot(as_float(est, 'x') - tx, as_float(est, 'y') - ty)
+            if d < best_d:
+                best_id = eid
+                best_d = d
+        if best_id is not None and best_d <= 1.5:
+            used.add(best_id)
+            matches.append({
+                'truth_id': tid,
+                'estimate_id': best_id,
+                'error_m': round(best_d, 3),
+                'time_s': round(first_t.get(best_id, as_float(confirmed[best_id], 't')), 3),
+            })
+
+    path_length = 0.0
+    for a, b in zip(traj_rows, traj_rows[1:]):
+        path_length += math.hypot(as_float(b, 'wx') - as_float(a, 'wx'),
+                                  as_float(b, 'wy') - as_float(a, 'wy'))
+    truth_count = len(truth_latest)
+    confirmed_count = len(confirmed)
+    times = [m['time_s'] for m in matches]
+    return {
+        'source_recall': round(len(matches) / max(1, truth_count), 3),
+        'source_precision': round(len(matches) / max(1, confirmed_count), 3),
+        'time_to_first_source': min(times) if times else None,
+        'time_to_all_sources': max(times) if len(matches) == truth_count and times else None,
+        'localization_errors_m': matches,
+        'duplicate_confirmations': max(0, confirmed_count - len(matches)),
+        'path_length_m': round(path_length, 3),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('run_dir')
+    parser.add_argument('--out', default='source_summary.json')
+    args = parser.parse_args()
+    run_dir = Path(args.run_dir).expanduser()
+    summary = compute(run_dir)
+    out = run_dir / args.out
+    with open(out, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == '__main__':
+    main()

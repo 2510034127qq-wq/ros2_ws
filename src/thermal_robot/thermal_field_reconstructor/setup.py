@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'reconstructor_node = thermal_field_reconstructor.reconstructor_node:main',
+            'thermal_mapper_node = thermal_field_reconstructor.thermal_mapper_node:main',
         ],
     },
 )

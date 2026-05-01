@@ -13,8 +13,6 @@ v13 Config-B 通用性验证配置：
 
 import math
 import time
-from dataclasses import dataclass
-from typing import Tuple
 
 import numpy as np
 import rclpy
@@ -23,35 +21,17 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
                         QoSHistoryPolicy, QoSDurabilityPolicy)
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
+from thermal_interfaces.msg import SourceEstimate, SourceEstimateArray
 
-SPAWN_X = -6.0
-SPAWN_Y =  0.0
-
-@dataclass
-class WorldHeatSource:
-    world_x: float
-    world_y: float
-    amplitude: float
-    sigma_m: float
-
-    def position(self, t: float) -> Tuple[float, float]:
-        return (self.world_x, self.world_y)
-
-
-# ★ Config-B: 通用性验证配置（不同空间分布 + 弱源测试）★
-# 测试目标：
-#   SA_left:  中偏上，强源，peak=57°C（验证梯度上升精度）
-#   SB_far:   右下，中源，d_spawn=12.4m，peak=44°C（验证远距发现能力）
-#   SC_weak:  左下近spawn，弱源，peak=38°C，sigma=0.8m（验证弱源检测）
-# 所有源间距>7m（远超excl_r=2.0m），不存在路径阻塞问题
-WORLD_SOURCES = [
-    WorldHeatSource(world_x=-1.0, world_y= 3.5, amplitude=35.0, sigma_m=1.1),  # SA_left  peak≈57°C
-    WorldHeatSource(world_x= 6.0, world_y=-3.0, amplitude=22.0, sigma_m=0.9),  # SB_far   peak≈44°C
-    WorldHeatSource(world_x=-5.0, world_y=-5.5, amplitude=16.0, sigma_m=0.8),  # SC_weak  peak≈38°C
-]
-
-SENSOR_FOV_X = 4.0
-SENSOR_FOV_Y = 3.0
+from thermal_sensor_sim.scenario import (
+    SENSOR_FOV_X,
+    SENSOR_FOV_Y,
+    SPAWN_X,
+    SPAWN_Y,
+    SourceState,
+    default_config_b_scenario,
+    load_scenario_file,
+)
 
 
 class SensorNode(Node):
@@ -66,6 +46,7 @@ class SensorNode(Node):
         self.declare_parameter('noise_std',     0.5)
         self.declare_parameter('random_seed',   42)
         self.declare_parameter('num_sources',   3)
+        self.declare_parameter('scenario_file', '')
 
         self._rate    = float(self.get_parameter('publish_rate').value)
         self._frame   = self.get_parameter('frame_id').value
@@ -75,17 +56,28 @@ class SensorNode(Node):
         self._noise   = float(self.get_parameter('noise_std').value)
         seed          = int(self.get_parameter('random_seed').value)
         n_src         = int(self.get_parameter('num_sources').value)
+        scenario_file = str(self.get_parameter('scenario_file').value or '')
 
         self._rng     = np.random.default_rng(seed)
-        self._sources = WORLD_SOURCES[:max(1, min(n_src, len(WORLD_SOURCES)))]
+        if scenario_file:
+            self._scenario = load_scenario_file(scenario_file, n_src)
+            self._scenario_label = scenario_file
+        else:
+            self._scenario = default_config_b_scenario(n_src)
+            self._scenario_label = 'Config-B fallback'
+        self._sources = self._scenario.sources
+        self._spawn_x = self._scenario.spawn_x
+        self._spawn_y = self._scenario.spawn_y
+        self._fov_x = self._scenario.fov_x
+        self._fov_y = self._scenario.fov_y
         self._t0      = time.monotonic()
 
         self._odom_x   = 0.0
         self._odom_y   = 0.0
         self._odom_yaw = 0.0
 
-        px_xs = np.linspace(-SENSOR_FOV_X/2, SENSOR_FOV_X/2, self._W, dtype=np.float32)
-        px_ys = np.linspace(-SENSOR_FOV_Y/2, SENSOR_FOV_Y/2, self._H, dtype=np.float32)
+        px_xs = np.linspace(-self._fov_x/2, self._fov_x/2, self._W, dtype=np.float32)
+        px_ys = np.linspace(-self._fov_y/2, self._fov_y/2, self._H, dtype=np.float32)
         self._px_xx, self._px_yy = np.meshgrid(px_xs, px_ys)
 
         pub_qos = QoSProfile(
@@ -97,19 +89,20 @@ class SensorNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST, depth=5,
             durability=QoSDurabilityPolicy.VOLATILE)
 
-        self._pub   = self.create_publisher(Image, '/sim/thermal_raw', pub_qos)
-        self._sub   = self.create_subscription(Odometry, '/odom', self._odom_cb, odom_qos)
-        self._timer = self.create_timer(1.0 / self._rate, self._cb)
+        self._pub       = self.create_publisher(Image, '/sim/thermal_raw', pub_qos)
+        self._truth_pub = self.create_publisher(SourceEstimateArray, '/sim/thermal_sources_truth', pub_qos)
+        self._sub       = self.create_subscription(Odometry, '/odom', self._odom_cb, odom_qos)
+        self._timer     = self.create_timer(1.0 / self._rate, self._cb)
 
         T_init = self._ambient + sum(
             s.amplitude * math.exp(
-                -((SPAWN_X - s.world_x)**2 + (SPAWN_Y - s.world_y)**2)
+                -((self._spawn_x - s.world_x)**2 + (self._spawn_y - s.world_y)**2)
                 / (2 * s.sigma_m**2))
             for s in self._sources)
         self.get_logger().info(
             f'sensor_node v13 | {self._W}×{self._H} | {self._rate}Hz '
-            f'| spawn=({SPAWN_X},{SPAWN_Y}) | T_init={T_init:.1f}°C '
-            f'| SA@(-1,3.5) A=35 | SB@(6,-3) A=22 | SC@(-5,-5.5) A=16')
+            f'| spawn=({self._spawn_x},{self._spawn_y}) | T_init={T_init:.1f}°C '
+            f'| scenario={self._scenario_label} | sources={len(self._sources)}')
 
     def _odom_cb(self, msg: Odometry):
         self._odom_x = msg.pose.pose.position.x
@@ -120,8 +113,8 @@ class SensorNode(Node):
         self._odom_yaw = math.atan2(siny_cosp, cosy_cosp)
 
     def _world_field_at_sensor(self, t: float) -> np.ndarray:
-        world_robot_x = SPAWN_X + self._odom_x
-        world_robot_y = SPAWN_Y + self._odom_y
+        world_robot_x = self._spawn_x + self._odom_x
+        world_robot_y = self._spawn_y + self._odom_y
         yaw = self._odom_yaw
 
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
@@ -129,8 +122,8 @@ class SensorNode(Node):
         world_ys = world_robot_y + sin_y * self._px_xx + cos_y * self._px_yy
 
         field = np.full((self._H, self._W), self._ambient, dtype=np.float32)
-        for src in self._sources:
-            sx, sy = src.position(t)
+        for src in self._scenario.active_states(t):
+            sx, sy = src.x, src.y
             dx = world_xs - sx
             dy = world_ys - sy
             field += (src.amplitude *
@@ -156,14 +149,43 @@ class SensorNode(Node):
         msg.step         = self._W * 4
         msg.data         = arr.tobytes()
         self._pub.publish(msg)
+        self._publish_truth(msg.header, t)
 
         if int(t * self._rate) % 50 == 0:
-            wx = SPAWN_X + self._odom_x
-            wy = SPAWN_Y + self._odom_y
+            wx = self._spawn_x + self._odom_x
+            wy = self._spawn_y + self._odom_y
             self.get_logger().info(
                 f't={t:.0f}s world=({wx:.2f},{wy:.2f}) '
                 f'odom=({self._odom_x:.2f},{self._odom_y:.2f}) '
                 f'T=[{arr.min():.1f},{arr.max():.1f}]°C')
+
+    def _publish_truth(self, header, t: float):
+        truth = SourceEstimateArray()
+        truth.header = header
+        truth.header.frame_id = 'world'
+        for state in self._scenario.all_states(t):
+            src = self._truth_msg_from_state(header, state)
+            truth.sources.append(src)
+        self._truth_pub.publish(truth)
+
+    def _truth_msg_from_state(self, header, state: SourceState) -> SourceEstimate:
+        msg = SourceEstimate()
+        msg.header = header
+        msg.header.frame_id = 'world'
+        msg.id = state.source_id
+        msg.status = 'truth_active' if state.active else 'truth_inactive'
+        msg.position.x = float(state.x)
+        msg.position.y = float(state.y)
+        msg.position.z = 0.0
+        msg.covariance_xx = 0.0
+        msg.covariance_xy = 0.0
+        msg.covariance_yy = 0.0
+        msg.strength = float(state.amplitude)
+        msg.sigma = float(state.sigma_m)
+        msg.existence_probability = 1.0 if state.active else 0.0
+        msg.confidence = 1.0
+        msg.observations = 1
+        return msg
 
 
 def main(args=None):

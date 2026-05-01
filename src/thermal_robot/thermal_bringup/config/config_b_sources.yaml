@@ -1,0 +1,23 @@
+robot:
+  spawn:
+    x: -6.0
+    y: 0.0
+sensor:
+  fov_x: 4.0
+  fov_y: 3.0
+sources:
+  - id: SA_left
+    position: [-1.0, 3.5]
+    amplitude: 35.0
+    sigma_m: 1.1
+    motion: static
+  - id: SB_far
+    position: [6.0, -3.0]
+    amplitude: 22.0
+    sigma_m: 0.9
+    motion: static
+  - id: SC_weak
+    position: [-5.0, -5.5]
+    amplitude: 16.0
+    sigma_m: 0.8
+    motion: static

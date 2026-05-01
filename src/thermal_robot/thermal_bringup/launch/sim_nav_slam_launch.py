@@ -21,7 +21,6 @@ sim_nav_slam_launch.py — G1 热导航仿真启动文件（SLAM + Nav2 版）
 话题接口（新增）：
   /scan              sensor_msgs/LaserScan  10Hz  → slam_toolbox
   /map               nav_msgs/OccupancyGrid       ← slam_toolbox
-  /goal_pose         geometry_msgs/PoseStamped    ← controller_node（COARSE 模式）
   /navigate_to_pose  Action                       ← controller_node → Nav2
 
 参考：
@@ -32,8 +31,7 @@ sim_nav_slam_launch.py — G1 热导航仿真启动文件（SLAM + Nav2 版）
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
-                             TimerAction, GroupAction)
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -59,6 +57,7 @@ def generate_launch_description():
     use_rviz     = LaunchConfiguration('use_rviz',     default='true')
     use_gzclient = LaunchConfiguration('use_gzclient', default='true')
     use_sim_t    = LaunchConfiguration('use_sim_time', default='false')
+    scenario_file = LaunchConfiguration('scenario_file', default='')
 
     gz_env = dict(os.environ)
     gz_env['QT_QPA_PLATFORM']   = 'xcb'
@@ -83,6 +82,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz',     default_value='true'),
         DeclareLaunchArgument('use_gzclient', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('scenario_file', default_value=''),
 
         # ══════════════════════════════════════════════════════════════════
         # t=0s: Gazebo + Robot State Publisher
@@ -233,7 +233,10 @@ def generate_launch_description():
                 package='thermal_sensor_sim',
                 executable='sensor_node',
                 name='sensor_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file, {
+                    'use_sim_time': use_sim_t,
+                    'scenario_file': scenario_file,
+                }],
                 output='both',
             ),
             Node(
@@ -251,9 +254,23 @@ def generate_launch_description():
                 output='both',
             ),
             Node(
+                package='thermal_field_reconstructor',
+                executable='thermal_mapper_node',
+                name='thermal_mapper_node',
+                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                output='both',
+            ),
+            Node(
                 package='thermal_gradient_processor',
                 executable='gradient_node',
                 name='gradient_node',
+                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                output='both',
+            ),
+            Node(
+                package='thermal_motion_controller',
+                executable='source_tracker_node',
+                name='source_tracker_node',
                 parameters=[params_file, {'use_sim_time': use_sim_t}],
                 output='both',
             ),
