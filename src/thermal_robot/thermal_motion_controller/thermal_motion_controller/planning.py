@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -35,6 +36,13 @@ class PlannerTarget:
     reason: str
 
 
+@dataclass
+class PlannerSector:
+    yaw: float
+    score: float
+    reason: str
+
+
 def select_information_gain_target(
     robot_wx: float,
     robot_wy: float,
@@ -53,6 +61,8 @@ def select_information_gain_target(
     max_d: float = 16.0,
     safe_dist: float = 2.3,
     weights: PlannerWeights = PlannerWeights(),
+    preferred_yaw: Optional[float] = None,
+    directional_weight: float = 0.0,
 ) -> Optional[PlannerTarget]:
     if width <= 0 or height <= 0:
         return None
@@ -95,11 +105,17 @@ def select_information_gain_target(
     risk_penalty = np.zeros_like(dist, dtype=np.float32)
     map_margin = np.minimum.reduce([xx, yy, width - 1 - xx, height - 1 - yy]).astype(np.float32)
     risk_penalty += np.clip(1.0 - map_margin / 4.0, 0.0, 1.0) * 0.5
+    directional_gain = np.zeros_like(dist, dtype=np.float32)
+    if preferred_yaw is not None and directional_weight > 0.0:
+        target_yaw = np.arctan2(wy - robot_wy, wx - robot_wx)
+        align = 0.5 + 0.5 * np.cos(target_yaw - float(preferred_yaw))
+        directional_gain = align.astype(np.float32)
 
     score = (
         weights.information_gain * information_gain
         + weights.source_probability * source_probability
         + weights.coverage_gain * coverage_gain
+        + float(directional_weight) * directional_gain
         - weights.travel_cost * travel_cost
         - weights.duplicate_penalty * duplicate
         - weights.risk_penalty * risk_penalty
@@ -119,6 +135,83 @@ def select_information_gain_target(
     )
 
 
+def select_exploration_sector_yaw(
+    robot_wx: float,
+    robot_wy: float,
+    width: int,
+    height: int,
+    resolution: float,
+    origin_x: float,
+    origin_y: float,
+    temperature_variance: np.ndarray,
+    confidence: np.ndarray,
+    visit_count: np.ndarray,
+    last_seen_age_s: np.ndarray,
+    known_sources: Sequence[Tuple[float, float]] = (),
+    min_d: float = 3.0,
+    max_d: float = 16.0,
+    safe_dist: float = 2.3,
+    phase_yaw: float = 0.0,
+    num_sectors: int = 16,
+) -> Optional[PlannerSector]:
+    """Pick an exploration direction from map evidence, not scenario layout.
+
+    The phase is only a deterministic tie-breaker for equally unknown maps.  The
+    main score is uncertainty, low confidence, low visit count, age, travel cost,
+    and distance from confirmed sources.
+    """
+    if width <= 0 or height <= 0 or num_sectors <= 0:
+        return None
+    variance = _reshape(temperature_variance, height, width)
+    conf = _reshape(confidence, height, width)
+    visits = _reshape(visit_count, height, width).astype(np.float32)
+    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
+    wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
+    dist = np.sqrt((wx - robot_wx) ** 2 + (wy - robot_wy) ** 2)
+    valid = (dist >= min_d) & (dist <= max_d)
+
+    duplicate = np.zeros_like(dist, dtype=np.float32)
+    for sx, sy in known_sources:
+        d = np.sqrt((wx - sx) ** 2 + (wy - sy) ** 2)
+        valid &= d >= safe_dist
+        duplicate = np.maximum(duplicate, np.exp(-0.5 * (d / max(safe_dist, 0.25)) ** 2))
+    if not np.any(valid):
+        return None
+
+    var_norm = _norm_clip(variance)
+    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
+    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
+    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
+    coverage_gain = 1.0 / (1.0 + visits)
+    travel_cost = np.clip(dist / max(max_d, 1e-3), 0.0, 1.0)
+    cell_score = 0.58 * information_gain + 0.42 * coverage_gain - 0.35 * travel_cost - 0.85 * duplicate
+    angle = np.arctan2(wy - robot_wy, wx - robot_wx)
+    sector_width = math.pi / max(1, num_sectors)
+    valid_count = float(np.count_nonzero(valid))
+
+    best: Optional[PlannerSector] = None
+    for idx in range(num_sectors):
+        yaw = _wrap_angle(float(phase_yaw) + idx * 2.0 * math.pi / num_sectors)
+        diff = np.abs(np.arctan2(np.sin(angle - yaw), np.cos(angle - yaw)))
+        mask = valid & (diff <= sector_width)
+        if not np.any(mask):
+            continue
+        values = cell_score[mask]
+        cutoff = float(np.percentile(values, 80.0))
+        top = values[values >= cutoff]
+        top_mean = float(np.mean(top)) if top.size else float(np.mean(values))
+        sector_mean = float(np.mean(values))
+        area_gain = float(np.count_nonzero(mask)) / max(1.0, valid_count)
+        tie_break = 0.01 * math.cos(yaw - float(phase_yaw))
+        score = 0.72 * top_mean + 0.18 * sector_mean + 0.10 * area_gain + tie_break
+        if best is None or score > best.score:
+            best = PlannerSector(yaw=yaw, score=score, reason="sector_information")
+    return best
+
+
 def _reshape(values: np.ndarray, height: int, width: int) -> np.ndarray:
     arr = np.asarray(values)
     if arr.shape == (height, width):
@@ -133,3 +226,7 @@ def _norm_clip(values: np.ndarray) -> np.ndarray:
     if p95 <= 1e-6:
         return np.zeros_like(finite, dtype=np.float32)
     return np.clip(finite / p95, 0.0, 1.0).astype(np.float32)
+
+
+def _wrap_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))

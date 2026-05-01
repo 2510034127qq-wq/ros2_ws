@@ -473,50 +473,61 @@ class DataCollector(Node):
         })
 
     def _source_level_summary(self, duration: float) -> dict:
-        truth_latest = {}
+        truth_history = {}
         for rec in self._truth:
             if rec['status'] == 'truth_active':
-                truth_latest[rec['id']] = rec
-        if not truth_latest:
+                truth_history.setdefault(rec['id'], []).append(rec)
+        if not truth_history:
             for src in CONFIG_B_SOURCES:
-                truth_latest[src['name']] = {
+                truth_history[src['name']] = [{
+                    't': 0.0,
                     'id': src['name'],
                     'x': src['xy'][0],
                     'y': src['xy'][1],
                     'status': 'truth_active',
-                }
+                }]
 
-        confirmed = {}
-        first_confirm_t = {}
+        confirmed_history = {}
+        first_confirmed_t = {}
         for rec in self._sources:
             if rec['status'] != 'confirmed':
                 continue
-            confirmed[rec['id']] = rec
-            first_confirm_t.setdefault(rec['id'], rec['t'])
+            if rec.get('probability', 1.0) < 0.5:
+                continue
+            first_confirmed_t.setdefault(rec['id'], rec['t'])
+            confirmed_history.setdefault(rec['id'], []).append(rec)
 
         matches = []
         used_est = set()
-        for tid, truth in truth_latest.items():
+        for tid, truth_records in truth_history.items():
             best_id = None
             best_d = float('inf')
-            for eid, est in confirmed.items():
+            best_truth = None
+            best_est = None
+            for eid, estimates in confirmed_history.items():
                 if eid in used_est:
                     continue
-                d = math.hypot(est['x'] - truth['x'], est['y'] - truth['y'])
-                if d < best_d:
-                    best_id = eid
-                    best_d = d
+                for est in estimates:
+                    truth = min(truth_records, key=lambda r: abs(r['t'] - est['t']))
+                    d = math.hypot(est['x'] - truth['x'], est['y'] - truth['y'])
+                    if d < best_d:
+                        best_id = eid
+                        best_d = d
+                        best_truth = truth
+                        best_est = est
             if best_id is not None and best_d <= 1.5:
                 used_est.add(best_id)
                 matches.append({
                     'truth_id': tid,
                     'estimate_id': best_id,
                     'error_m': round(best_d, 3),
-                    'time_s': round(first_confirm_t.get(best_id, confirmed[best_id]['t']), 3),
+                    'time_s': round(first_confirmed_t.get(best_id, best_est['t'] if best_est else 0.0), 3),
+                    'truth_x': round(best_truth['x'], 3) if best_truth else None,
+                    'truth_y': round(best_truth['y'], 3) if best_truth else None,
                 })
 
-        truth_count = len(truth_latest)
-        confirmed_count = len(confirmed)
+        truth_count = len(truth_history)
+        confirmed_count = len(confirmed_history)
         recall = len(matches) / max(1, truth_count)
         precision = len(matches) / max(1, confirmed_count)
         times = [m['time_s'] for m in matches]
@@ -541,6 +552,23 @@ class DataCollector(Node):
             },
             'duration_s': round(duration, 3),
         }
+
+    def _truth_sources_snapshot(self) -> list:
+        latest = {}
+        for rec in self._truth:
+            if rec['status'] == 'truth_active':
+                latest[rec['id']] = rec
+        if not latest:
+            return CONFIG_B_SOURCES
+        return [
+            {
+                'name': rec['id'],
+                'xy': [round(rec['x'], 3), round(rec['y'], 3)],
+                'amp': round(rec.get('strength', 0.0), 3),
+                'sigma': round(rec.get('sigma', 0.0), 3),
+            }
+            for rec in latest.values()
+        ]
 
     # ──────────────────────────────────────────────────────────────────────────
     # 保存
@@ -594,7 +622,7 @@ class DataCollector(Node):
             else:
                 rate_summary[topic] = {'mean_hz': 0.0, 'n_msgs': len(times)}
 
-        # [v3] 元数据（更新为 Config-B 源参数）
+        # [v3] 元数据（动态场景时使用采集到的最新 active truth）
         meta = {
             'version':           'v3_slam_nav2',
             'recorded_at':       datetime.now().isoformat(),
@@ -620,12 +648,11 @@ class DataCollector(Node):
                 'scan_stats':    len(self._scan_stats),
                 'nav2_plans':    len(self._plan_stats),
             },
-            # Config-B 热源参数（与 sensor_node.py v13 一致）
-            'sources': CONFIG_B_SOURCES,
+            'sources': self._truth_sources_snapshot(),
             'spawn':             {'x': SPAWN_X, 'y': SPAWN_Y},
             'arrival_radius_m':  0.5,
             'ambient_temp_c':    22.0,
-            'config':            'Config-B',
+            'config':            'scenario_or_Config-B',
         }
         with open(out / 'metadata.json', 'w') as f:
             json.dump(meta, f, indent=2)

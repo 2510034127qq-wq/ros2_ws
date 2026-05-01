@@ -1,0 +1,30 @@
+name: dynamic_waypoint_random_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: W1_waypoint
+    xy: [-3.0, 2.0]
+    amplitude: 29.0
+    sigma_m: 1.0
+    motion: waypoint_loop
+    motion_params:
+      speed_m_s: 0.08
+      waypoints:
+        - [-3.5, 2.0]
+        - [-1.5, 3.5]
+        - [-2.0, 1.5]
+  - id: W2_random
+    xy: [3.5, -2.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: random_walk
+    motion_params: {speed_m_s: 0.06, turn_rate_rad_s: 0.5, bounds_radius_m: 1.5}
+    seed: 17
+  - id: W3_static_weak
+    xy: [-6.0, -5.0]
+    amplitude: 18.0
+    sigma_m: 0.8
+    motion: static

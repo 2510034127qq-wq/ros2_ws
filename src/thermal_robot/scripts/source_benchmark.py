@@ -27,45 +27,55 @@ def compute(run_dir: Path) -> dict:
     estimate_rows = read_csv(run_dir / 'source_estimates.csv')
     traj_rows = read_csv(run_dir / 'trajectory.csv')
 
-    truth_latest = {}
+    truth_history = {}
     for row in truth_rows:
         if row.get('status') == 'truth_active':
-            truth_latest[row['id']] = row
+            truth_history.setdefault(row['id'], []).append(row)
     confirmed = {}
     first_t = {}
     for row in estimate_rows:
         if row.get('status') != 'confirmed':
             continue
-        confirmed[row['id']] = row
+        if as_float(row, 'probability', 1.0) < 0.5:
+            continue
+        confirmed.setdefault(row['id'], []).append(row)
         first_t.setdefault(row['id'], as_float(row, 't'))
 
     matches = []
     used = set()
-    for tid, truth in truth_latest.items():
+    for tid, truth_records in truth_history.items():
         best_id = None
         best_d = float('inf')
-        tx, ty = as_float(truth, 'x'), as_float(truth, 'y')
-        for eid, est in confirmed.items():
+        best_truth = None
+        best_est = None
+        for eid, estimates in confirmed.items():
             if eid in used:
                 continue
-            d = math.hypot(as_float(est, 'x') - tx, as_float(est, 'y') - ty)
-            if d < best_d:
-                best_id = eid
-                best_d = d
+            for est in estimates:
+                truth = min(truth_records, key=lambda r: abs(as_float(r, 't') - as_float(est, 't')))
+                tx, ty = as_float(truth, 'x'), as_float(truth, 'y')
+                d = math.hypot(as_float(est, 'x') - tx, as_float(est, 'y') - ty)
+                if d < best_d:
+                    best_id = eid
+                    best_d = d
+                    best_truth = truth
+                    best_est = est
         if best_id is not None and best_d <= 1.5:
             used.add(best_id)
             matches.append({
                 'truth_id': tid,
                 'estimate_id': best_id,
                 'error_m': round(best_d, 3),
-                'time_s': round(first_t.get(best_id, as_float(confirmed[best_id], 't')), 3),
+                'time_s': round(first_t.get(best_id, as_float(best_est, 't')), 3),
+                'truth_x': round(as_float(best_truth, 'x'), 3) if best_truth else None,
+                'truth_y': round(as_float(best_truth, 'y'), 3) if best_truth else None,
             })
 
     path_length = 0.0
     for a, b in zip(traj_rows, traj_rows[1:]):
         path_length += math.hypot(as_float(b, 'wx') - as_float(a, 'wx'),
                                   as_float(b, 'wy') - as_float(a, 'wy'))
-    truth_count = len(truth_latest)
+    truth_count = len(truth_history)
     confirmed_count = len(confirmed)
     times = [m['time_s'] for m in matches]
     return {

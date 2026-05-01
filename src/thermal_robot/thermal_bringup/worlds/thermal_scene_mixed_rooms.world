@@ -1,0 +1,121 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="thermal_nav_mixed_rooms">
+    <physics type="ode">
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>50</iters>
+          <sor>1.0</sor>
+          <use_dynamic_moi_rescaling>0</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>0.0001</cfm>
+          <erp>0.1</erp>
+          <contact_max_correcting_vel>2.0</contact_max_correcting_vel>
+          <contact_surface_layer>0.005</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <scene>
+      <ambient>0.46 0.46 0.46 1</ambient>
+      <background>0.17 0.20 0.21 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>0 0 22 0 1.5707 0</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+    <model name="robot_start_marker">
+      <static>true</static>
+      <pose>-6.0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="pad">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.6 0.6 0.04</size></box></geometry>
+          <material><script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Green</name>
+          </script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_north_short">
+      <static>true</static>
+      <pose>-1.4 3.9 0.55 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>5.0 0.25 1.1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>5.0 0.25 1.1</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south_short">
+      <static>true</static>
+      <pose>1.7 -3.8 0.55 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.8 0.25 1.1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>4.8 0.25 1.1</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_vertical_west">
+      <static>true</static>
+      <pose>-3.6 1.7 0.55 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.0 0.25 1.1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.0 0.25 1.1</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_vertical_east">
+      <static>true</static>
+      <pose>4.4 -1.2 0.55 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.2 0.25 1.1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.2 0.25 1.1</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="island_center">
+      <static>true</static>
+      <pose>-0.3 0.2 0.45 0 0 0.65</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.3 0.8 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.3 0.8 0.9</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="island_southwest">
+      <static>true</static>
+      <pose>-5.0 -2.8 0.45 0 0 -0.4</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.4 0.7 0.9</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.4 0.7 0.9</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

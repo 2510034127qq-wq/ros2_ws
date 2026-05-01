@@ -21,12 +21,14 @@ class SourceTrackerNode(Node):
         self.declare_parameter('max_detections', 12)
         self.declare_parameter('gate_m', 1.25)
         self.declare_parameter('merge_radius_m', 1.0)
-        self.declare_parameter('duplicate_radius_m', 2.0)
+        self.declare_parameter('duplicate_radius_m', 2.5)
         self.declare_parameter('confirm_probability', 0.75)
         self.declare_parameter('confirm_observations', 5)
         self.declare_parameter('confirm_covariance_max', 0.9)
         self.declare_parameter('stale_after_s', 12.0)
         self.declare_parameter('stale_decay_s', 20.0)
+        self.declare_parameter('update_alpha_min', 0.08)
+        self.declare_parameter('max_detection_age_s', 8.0)
 
         g = self.get_parameter
         self._tracker = SourceTrackerCore(
@@ -42,6 +44,8 @@ class SourceTrackerNode(Node):
             confirm_covariance_max=float(g('confirm_covariance_max').value),
             stale_after_s=float(g('stale_after_s').value),
             stale_decay_s=float(g('stale_decay_s').value),
+            update_alpha_min=float(g('update_alpha_min').value),
+            max_detection_age_s=float(g('max_detection_age_s').value),
         )
         self._t0 = time.monotonic()
         self._last_log_s = 0.0
@@ -63,8 +67,9 @@ class SourceTrackerNode(Node):
         now_s = time.monotonic() - self._t0
         temp = np.asarray(msg.temperature_mean, dtype=np.float32).reshape((msg.height, msg.width))
         conf = np.asarray(msg.confidence, dtype=np.float32).reshape((msg.height, msg.width))
+        age = np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape((msg.height, msg.width))
         tracks = self._tracker.update_from_map(
-            temp, conf, msg.resolution, msg.origin_x, msg.origin_y, now_s)
+            temp, conf, msg.resolution, msg.origin_x, msg.origin_y, now_s, age)
         out = SourceEstimateArray()
         out.header = msg.header
         out.header.frame_id = 'world'

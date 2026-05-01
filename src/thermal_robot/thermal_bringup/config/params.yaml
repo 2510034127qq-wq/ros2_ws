@@ -76,12 +76,14 @@ source_tracker_node:
     max_detections:           12
     gate_m:                    1.25
     merge_radius_m:            1.0
-    duplicate_radius_m:        2.0
+    duplicate_radius_m:        2.5
     confirm_probability:       0.75
     confirm_observations:      5
     confirm_covariance_max:    0.9
     stale_after_s:            12.0
     stale_decay_s:            20.0
+    update_alpha_min:          0.08
+    max_detection_age_s:       8.0
 
 controller_node:
   ros__parameters:
@@ -139,6 +141,7 @@ controller_node:
     post_confirm_min_d:         7.0   # boost期间frontier最小距离
     post_confirm_dist_sigma:   15.0   # boost期间距离衰减sigma
     levy_post_confirm_step:    10.0   # 确认后定向Lévy步长
+    post_confirm_departure_dist: 9.0
 
     # ── CONVERGE ─────────────────────────────────────────────────────────────
     pre_peak_thresh_ratio:    0.25
@@ -155,6 +158,16 @@ controller_node:
     sample_center_pixel_radius: 12
     sample_hold_s:       3.0
     sample_min_trise:    8.0
+    tracker_verify_probability:       0.75
+    tracker_verify_observations:      5
+    tracker_verify_max_dist:          3.8
+    tracker_verify_arrival_r:         1.2
+    tracker_verify_min_elapsed_s:     6.0
+    tracker_approach_lin_vel:         0.18
+    post_confirm_cooldown_s:         25.0
+    post_confirm_guard_near_dist:     6.0
+    departure_directional_weight:     0.55
+    coverage_directional_weight:      0.65
 
     # ── World-map information-gain planner ─────────────────────────────────
     planner_information_gain_weight:       1.0

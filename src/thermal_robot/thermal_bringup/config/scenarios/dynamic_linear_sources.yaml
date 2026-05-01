@@ -1,0 +1,25 @@
+name: dynamic_linear_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: L1_slow_east
+    xy: [-4.5, 3.0]
+    amplitude: 30.0
+    sigma_m: 1.0
+    motion: linear
+    motion_params: {vx: 0.035, vy: -0.01}
+  - id: L2_cross
+    xy: [3.5, -2.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: linear
+    motion_params: {vx: -0.025, vy: 0.02}
+  - id: L3_drift
+    xy: [-6.5, -4.5]
+    amplitude: 18.0
+    sigma_m: 0.8
+    motion: static
+    strength_drift: {rate_per_s: 0.015, sin_amplitude: 1.5, sin_period_s: 45.0}

@@ -9,7 +9,7 @@ sim_nav_slam_launch.py — G1 热导航仿真启动文件（SLAM + Nav2 版）
                                       ↘ 直接 /cmd_vel（FINE 模式）
 
 启动顺序：
-  t=0s:   gzserver（载入 thermal_scene_nav.world）
+  t=0s:   gzserver（载入 world_file，默认 thermal_scene_nav.world）
   t=0s:   robot_state_publisher（g1_nav.urdf，含激光雷达 TF）
   t=5s:   gzclient（use_gzclient:=true 时）
   t=6s:   spawn_entity（x=-6, y=0）
@@ -42,7 +42,7 @@ def generate_launch_description():
     g1_dir      = get_package_share_directory('g1_description')
 
     # ── 文件路径 ───────────────────────────────────────────────────────────
-    world_file    = os.path.join(bringup_dir, 'worlds',  'thermal_scene_nav.world')
+    default_world_file = os.path.join(bringup_dir, 'worlds',  'thermal_scene_nav.world')
     rviz_config   = os.path.join(bringup_dir, 'rviz',    'thermal_nav_slam.rviz')
     params_file   = os.path.join(bringup_dir, 'config',  'params.yaml')
     nav2_params   = os.path.join(bringup_dir, 'config',  'nav2_params.yaml')
@@ -58,6 +58,7 @@ def generate_launch_description():
     use_gzclient = LaunchConfiguration('use_gzclient', default='true')
     use_sim_t    = LaunchConfiguration('use_sim_time', default='false')
     scenario_file = LaunchConfiguration('scenario_file', default='')
+    world_file = LaunchConfiguration('world_file', default=default_world_file)
 
     gz_env = dict(os.environ)
     gz_env['QT_QPA_PLATFORM']   = 'xcb'
@@ -83,6 +84,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_gzclient', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('scenario_file', default_value=''),
+        DeclareLaunchArgument('world_file', default_value=default_world_file),
 
         # ══════════════════════════════════════════════════════════════════
         # t=0s: Gazebo + Robot State Publisher

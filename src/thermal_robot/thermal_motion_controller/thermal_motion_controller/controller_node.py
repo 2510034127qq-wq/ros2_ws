@@ -62,6 +62,7 @@ from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMa
 from thermal_motion_controller.planning import (
     PlannerSource,
     PlannerWeights,
+    select_exploration_sector_yaw,
     select_information_gain_target,
 )
 
@@ -319,6 +320,15 @@ class ControllerNode(Node):
         self.declare_parameter('planner_risk_penalty_weight', 0.2)
         self.declare_parameter('planner_map_stale_s', 5.0)
         self.declare_parameter('planner_candidate_verify_radius', 3.5)
+        self.declare_parameter('tracker_verify_probability', 0.75)
+        self.declare_parameter('tracker_verify_observations', 5)
+        self.declare_parameter('tracker_verify_max_dist', 3.8)
+        self.declare_parameter('tracker_verify_arrival_r', 1.2)
+        self.declare_parameter('tracker_verify_min_elapsed_s', 6.0)
+        self.declare_parameter('tracker_approach_lin_vel', 0.18)
+        self.declare_parameter('post_confirm_guard_near_dist', 6.0)
+        self.declare_parameter('departure_directional_weight', 0.55)
+        self.declare_parameter('coverage_directional_weight', 0.65)
 
         # ── Read parameters ───────────────────────────────────────────────
         g = self.get_parameter
@@ -415,6 +425,15 @@ class ControllerNode(Node):
         )
         self._planner_map_stale_s = float(g('planner_map_stale_s').value)
         self._candidate_verify_radius = float(g('planner_candidate_verify_radius').value)
+        self._tracker_verify_prob = float(g('tracker_verify_probability').value)
+        self._tracker_verify_obs = int(g('tracker_verify_observations').value)
+        self._tracker_verify_max_d = float(g('tracker_verify_max_dist').value)
+        self._tracker_verify_arrival_r = float(g('tracker_verify_arrival_r').value)
+        self._tracker_verify_min_elapsed_s = float(g('tracker_verify_min_elapsed_s').value)
+        self._tracker_approach_lin = float(g('tracker_approach_lin_vel').value)
+        self._pc_guard_near_dist = float(g('post_confirm_guard_near_dist').value)
+        self._departure_directional_weight = float(g('departure_directional_weight').value)
+        self._coverage_directional_weight = float(g('coverage_directional_weight').value)
 
         self._pre_pk_thresh = self._pre_pk_ratio * self._pk_tdelta
 
@@ -915,6 +934,41 @@ class ControllerNode(Node):
         return (self._thermal_map is not None
                 and (time.monotonic() - self._thermal_map_t) <= self._planner_map_stale_s)
 
+    def _phase_yaw_for_coverage(self):
+        # Generic low-discrepancy tie-breaker for equally unknown sectors.
+        golden = math.pi * (3.0 - math.sqrt(5.0))
+        return self._odom_yaw + golden * (self._search_rounds + self._coarse_wp_count)
+
+    def _phase_yaw_away_from_sources(self):
+        vx, vy = self._repulsion_vec()
+        if math.hypot(vx, vy) > 1e-6:
+            return math.atan2(vy, vx)
+        return self._phase_yaw_for_coverage()
+
+    def _map_sector_yaw(self, min_d=3.0, max_d=16.0, safe_dist=None, phase_yaw=None):
+        if not self._map_available():
+            return None
+        m = self._thermal_map
+        sector = select_exploration_sector_yaw(
+            robot_wx=self._wx,
+            robot_wy=self._wy,
+            width=m['width'],
+            height=m['height'],
+            resolution=m['resolution'],
+            origin_x=m['origin_x'],
+            origin_y=m['origin_y'],
+            temperature_variance=m['temperature_variance'],
+            confidence=m['confidence'],
+            visit_count=m['visit_count'],
+            last_seen_age_s=m['last_seen_age_s'],
+            known_sources=self._known_source_positions(),
+            min_d=min_d,
+            max_d=max_d,
+            safe_dist=self._safe_dist() if safe_dist is None else safe_dist,
+            phase_yaw=self._phase_yaw_for_coverage() if phase_yaw is None else phase_yaw,
+        )
+        return sector
+
     def _planner_sources(self):
         now = time.monotonic()
         if (now - self._tracker_sources_t) > self._planner_map_stale_s * 2.0:
@@ -956,7 +1010,14 @@ class ControllerNode(Node):
             return None
         return best
 
-    def _map_best_frontier(self, min_d=3.0, max_d=16.0, safe_dist=None):
+    def _map_best_frontier(
+        self,
+        min_d=3.0,
+        max_d=16.0,
+        safe_dist=None,
+        preferred_yaw=None,
+        directional_weight=0.0,
+    ):
         if not self._map_available():
             return None
         m = self._thermal_map
@@ -978,6 +1039,8 @@ class ControllerNode(Node):
             max_d=max_d,
             safe_dist=self._safe_dist() if safe_dist is None else safe_dist,
             weights=self._planner_weights,
+            preferred_yaw=preferred_yaw,
+            directional_weight=directional_weight,
         )
         if target is None:
             return None
@@ -1092,7 +1155,7 @@ class ControllerNode(Node):
             return False
         if self._is_near_known():
             return False
-        if now < self._pc_guard_t:
+        if now < self._pc_guard_t and self._nearest_known_dist() < self._pc_guard_near_dist:
             if not hasattr(self, '_last_guard_log_t') or (now-self._last_guard_log_t)>=30.0:
                 self._last_guard_log_t = now
                 self.get_logger().info(f'[CONVERGE_GUARD] remaining {self._pc_guard_t-now:.0f}s')
@@ -1196,7 +1259,25 @@ class ControllerNode(Node):
             mode_str=f'BOOST min_d={min_d:.1f}m'
         else:
             min_d=3.0; d_sig=8.0; mode_str='NORMAL'
-        ft=self._map_best_frontier(min_d=min_d,max_d=16.0,safe_dist=self._safe_dist())
+        planner_sources = self._planner_sources()
+        pref_yaw = None
+        dir_w = 0.0
+        if not ksrc and not planner_sources:
+            sector = self._map_sector_yaw(
+                min_d=min_d,
+                max_d=16.0,
+                safe_dist=self._safe_dist(),
+                phase_yaw=self._phase_yaw_for_coverage(),
+            )
+            pref_yaw = sector.yaw if sector is not None else self._phase_yaw_for_coverage()
+            dir_w = self._coverage_directional_weight
+        ft=self._map_best_frontier(
+            min_d=min_d,
+            max_d=16.0,
+            safe_dist=self._safe_dist(),
+            preferred_yaw=pref_yaw,
+            directional_weight=dir_w,
+        )
         if ft is None:
             ft=self._bmap.best_frontier(self._wx,self._wy,min_d=min_d,max_d=16.0,
                 dist_sigma=d_sig,known_sources=ksrc,safe_dist=self._safe_dist())
@@ -1250,6 +1331,28 @@ class ControllerNode(Node):
 
     def _compute_departure_wp(self) -> Tuple[float, float]:
         cx, cy = self._sources_centroid()
+        sector = self._map_sector_yaw(
+            min_d=max(self._pc_min_d, self._excl_r * 2.5),
+            max_d=max(self._pc_min_d + 2.0, self._departure_dist),
+            safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+            phase_yaw=self._phase_yaw_away_from_sources(),
+        )
+        preferred_yaw = sector.yaw if sector is not None else self._phase_yaw_away_from_sources()
+        ft = self._map_best_frontier(
+            min_d=max(self._pc_min_d, self._excl_r * 2.5),
+            max_d=max(self._pc_min_d + 2.0, self._departure_dist),
+            safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+            preferred_yaw=preferred_yaw,
+            directional_weight=self._departure_directional_weight,
+        )
+        if ft is not None:
+            tx, ty = ft[0], ft[1]
+            reason = ft[3] if len(ft) > 3 else 'information_gain'
+            self.get_logger().info(
+                f'[DEPARTURE_WP/map/{reason}] centroid=({cx:.1f},{cy:.1f}) '
+                f'sector={math.degrees(preferred_yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
+                f'd_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
+            return (tx, ty)
         best_yaw=random.uniform(-math.pi,math.pi); best_score=-1.0
         for i in range(24):
             yaw=-math.pi+(2.0*math.pi/24.0)*i; score=0.0
@@ -1261,7 +1364,8 @@ class ControllerNode(Node):
                 if self._found_sources:
                     min_src_d=min(math.hypot(px-sx,py-sy) for sx,sy,_ in self._found_sources)
                     src_ok=1.0 if min_src_d>self._departure_dist*0.3 else 0.0
-                score+=nov*src_ok
+                align=0.5+0.5*math.cos(yaw-preferred_yaw)
+                score+=nov*src_ok + 0.15*align
             if score>best_score: best_score=score; best_yaw=yaw
         tx=cx+self._departure_dist*math.cos(best_yaw)
         ty=cy+self._departure_dist*math.sin(best_yaw)
@@ -1269,6 +1373,29 @@ class ControllerNode(Node):
             f'[DEPARTURE_WP] centroid=({cx:.1f},{cy:.1f}) '
             f'→({tx:.1f},{ty:.1f}) d_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
         return (tx, ty)
+
+    def _tracker_source_ready_for_sample(self, est: Optional[Dict], trise: float, elapsed: float) -> bool:
+        if est is None:
+            return False
+        if est['probability'] < self._tracker_verify_prob:
+            return False
+        if est['observations'] < self._tracker_verify_obs:
+            return False
+        d_est = math.hypot(est['x'] - self._wx, est['y'] - self._wy)
+        if d_est > self._tracker_verify_max_d:
+            return False
+        if trise < self._adapt_sample_min():
+            return False
+        return d_est <= self._tracker_verify_arrival_r or elapsed >= self._tracker_verify_min_elapsed_s
+
+    def _enter_sample(self, now: float, T: float, reason: str):
+        self._state = STATE_SAMPLE
+        self._state_t = now
+        self._sample_t_start = now
+        self._sample_T_buf = [T]
+        self._conv_cold_t = None
+        self.get_logger().info(f'[CONVERGE→SAMPLE/{reason}]')
+        self._pub.publish(Twist())
 
     def _exec_departure(self, now: float):
         """
@@ -1282,7 +1409,7 @@ class ControllerNode(Node):
         dist   = math.hypot(tx-self._wx, ty-self._wy)
         elapsed = now - self._state_t
 
-        if dist <= self._frontier_r * 2.0:
+        if dist <= self._frontier_r:
             self.get_logger().info(f'[DEPARTURE→COARSE] arrived d={dist:.2f}m')
             self._enter_coarse_survey(reason='departure_arrived'); return
         if elapsed >= self._departure_timeout:
@@ -1305,10 +1432,24 @@ class ControllerNode(Node):
 
     def _coarse_waypoint(self):
         ksrc=self._known_source_positions()
+        planner_sources = self._planner_sources()
+        pref_yaw = None
+        dir_w = 0.0
+        if not ksrc and not planner_sources:
+            sector = self._map_sector_yaw(
+                min_d=self._survey_wp_min_d,
+                max_d=self._survey_wp_max_d,
+                safe_dist=self._survey_safe_dist,
+                phase_yaw=self._phase_yaw_for_coverage(),
+            )
+            pref_yaw = sector.yaw if sector is not None else self._phase_yaw_for_coverage()
+            dir_w = self._coverage_directional_weight
         ft=self._map_best_frontier(
             min_d=self._survey_wp_min_d,
             max_d=self._survey_wp_max_d,
-            safe_dist=self._survey_safe_dist)
+            safe_dist=self._survey_safe_dist,
+            preferred_yaw=pref_yaw,
+            directional_weight=dir_w)
         if ft is None:
             ft=self._bmap.best_frontier(self._wx,self._wy,
                 min_d=self._survey_wp_min_d,max_d=self._survey_wp_max_d,
@@ -1521,11 +1662,19 @@ class ControllerNode(Node):
             self._conv_cold_t=None
         sample_trigger=self._adapt_pk_delta()*self._conv_sample_ratio
         near_center=self._is_peak_near_fov_center(); fov_dist_m=self._peak_fov_dist_m()
+        tracker_est = self._best_tracker_source_for_sample()
+        tracker_dist = (math.hypot(tracker_est['x']-self._wx, tracker_est['y']-self._wy)
+                        if tracker_est is not None else float('inf'))
         if trise>=sample_trigger and not self._is_near_known():
+            if self._tracker_source_ready_for_sample(tracker_est, trise, elapsed):
+                self._enter_sample(
+                    now, T,
+                    f'tracker {tracker_est["id"]} p={tracker_est["probability"]:.2f} '
+                    f'obs={tracker_est["observations"]} d={tracker_dist:.1f}m')
+                return
             if near_center:
-                self._state=STATE_SAMPLE; self._state_t=now
-                self._sample_t_start=now; self._sample_T_buf=[T]
-                self._conv_cold_t=None; self._pub.publish(Twist()); return
+                self._enter_sample(now, T, f'fov_center dist={fov_dist_m:.2f}m')
+                return
             else:
                 if not hasattr(self,'_conv_approach_log_t') or (now-self._conv_approach_log_t)>=2.5:
                     self._conv_approach_log_t=now
@@ -1539,6 +1688,23 @@ class ControllerNode(Node):
             else:
                 self._conv_returning=False
         if self._last_ga and self._last_ga.gradients:
+            if (tracker_est is not None
+                    and tracker_est['probability'] >= self._tracker_verify_prob
+                    and tracker_dist <= self._tracker_verify_max_d
+                    and not self._is_near_known_pos(tracker_est['x'], tracker_est['y'],
+                                                    radius=self._excl_r)):
+                yaw = self._yaw_toward(tracker_est['x'], tracker_est['y'])
+                lin, ang = self._drive_toward_yaw(yaw, self._tracker_approach_lin)
+                self._pub.publish(self._make_cmd(lin, ang))
+                if T>self._conv_best_global_T:
+                    self._conv_best_global_T=T; self._conv_best_global_pos=(self._wx,self._wy)
+                if not hasattr(self,'_conv_tracker_log_t') or (now-self._conv_tracker_log_t)>=3.0:
+                    self._conv_tracker_log_t=now
+                    self.get_logger().info(
+                        f'[CONVERGE_TRACKER] {tracker_est["id"]} '
+                        f'p={tracker_est["probability"]:.2f} obs={tracker_est["observations"]} '
+                        f'd={tracker_dist:.1f}m trise={trise:.1f}C')
+                return
             lin,ang=self._gradient_cmd()
             speed_factor=max(0.3,1.0-trise/(self._adapt_pk_delta()*0.8))
             v_lin=max(0.03,min(self._conv_lin*speed_factor,self._conv_lin))

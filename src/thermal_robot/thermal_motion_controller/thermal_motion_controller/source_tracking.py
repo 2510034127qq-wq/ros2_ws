@@ -35,6 +35,7 @@ class TrackedSource:
     confidence: float
     observations: int
     last_seen_s: float
+    last_update_s: float
     covariance_xx: float = 2.0
     covariance_xy: float = 0.0
     covariance_yy: float = 2.0
@@ -53,12 +54,14 @@ class SourceTrackerCore:
         max_detections: int = 12,
         gate_m: float = 1.25,
         merge_radius_m: float = 1.0,
-        duplicate_radius_m: float = 2.0,
+        duplicate_radius_m: float = 2.5,
         confirm_probability: float = 0.75,
         confirm_observations: int = 5,
         confirm_covariance_max: float = 0.9,
         stale_after_s: float = 12.0,
         stale_decay_s: float = 20.0,
+        update_alpha_min: float = 0.08,
+        max_detection_age_s: float = float("inf"),
     ):
         self.ambient_temp = float(ambient_temp)
         self.min_temp_rise = float(min_temp_rise)
@@ -72,6 +75,8 @@ class SourceTrackerCore:
         self.confirm_covariance_max = float(confirm_covariance_max)
         self.stale_after_s = float(stale_after_s)
         self.stale_decay_s = max(1e-3, float(stale_decay_s))
+        self.update_alpha_min = max(0.0, min(0.6, float(update_alpha_min)))
+        self.max_detection_age_s = float(max_detection_age_s)
         self._tracks: Dict[str, TrackedSource] = {}
         self._next_id = 1
 
@@ -86,12 +91,17 @@ class SourceTrackerCore:
         resolution: float,
         origin_x: float,
         origin_y: float,
+        last_seen_age_s: Optional[np.ndarray] = None,
     ) -> List[SourceDetection]:
         temp = np.asarray(temperature_mean, dtype=np.float32)
         conf = np.asarray(confidence, dtype=np.float32)
         if temp.ndim != 2 or conf.shape != temp.shape or temp.size == 0:
             return []
         hot = (temp >= self.ambient_temp + self.min_temp_rise) & (conf >= self.min_confidence)
+        if last_seen_age_s is not None and math.isfinite(self.max_detection_age_s):
+            age = np.asarray(last_seen_age_s, dtype=np.float32)
+            if age.shape == temp.shape:
+                hot &= (age >= 0.0) & (age <= self.max_detection_age_s)
         if temp.shape[0] >= 3 and temp.shape[1] >= 3:
             center = temp[1:-1, 1:-1]
             local = np.ones_like(center, dtype=bool)
@@ -131,7 +141,11 @@ class SourceTrackerCore:
         updated_ids = set()
         for det in sorted(detections, key=lambda d: d.confidence * d.strength, reverse=True):
             track = self._nearest_track(det)
+            if track is not None and track.track_id in updated_ids:
+                continue
             if track is None:
+                if self._near_confirmed(det):
+                    continue
                 track = self._new_track(det, now_s)
             else:
                 self._update_track(track, det, now_s)
@@ -140,12 +154,14 @@ class SourceTrackerCore:
         for track in self._tracks.values():
             if track.track_id in updated_ids:
                 continue
-            dt = max(0.0, now_s - track.last_seen_s)
+            dt_since_seen = max(0.0, now_s - track.last_seen_s)
+            step_dt = max(0.0, now_s - track.last_update_s)
+            track.last_update_s = now_s
             track.consecutive_observations = 0
             if track.status != STATUS_SUPPRESSED:
-                track.existence_probability *= math.exp(-dt / self.stale_decay_s)
-                track.confidence *= math.exp(-dt / self.stale_decay_s)
-            if dt >= self.stale_after_s and track.status != STATUS_SUPPRESSED:
+                track.existence_probability *= math.exp(-step_dt / self.stale_decay_s)
+                track.confidence *= math.exp(-step_dt / self.stale_decay_s)
+            if dt_since_seen >= self.stale_after_s and track.status != STATUS_SUPPRESSED:
                 track.status = STATUS_STALE
 
         self._merge_close_tracks()
@@ -161,8 +177,10 @@ class SourceTrackerCore:
         origin_x: float,
         origin_y: float,
         now_s: float,
+        last_seen_age_s: Optional[np.ndarray] = None,
     ) -> List[TrackedSource]:
-        detections = self.extract_detections(temperature_mean, confidence, resolution, origin_x, origin_y)
+        detections = self.extract_detections(
+            temperature_mean, confidence, resolution, origin_x, origin_y, last_seen_age_s)
         return self.update(detections, now_s)
 
     def _nearest_track(self, det: SourceDetection) -> Optional[TrackedSource]:
@@ -180,6 +198,19 @@ class SourceTrackerCore:
             return best
         return None
 
+    def _near_confirmed(self, det: SourceDetection) -> bool:
+        return any(
+            self._blocks_duplicate_birth(track)
+            and math.hypot(det.x - track.x, det.y - track.y) <= self.duplicate_radius_m
+            for track in self._tracks.values()
+        )
+
+    def _blocks_duplicate_birth(self, track: TrackedSource) -> bool:
+        return (
+            track.status in (STATUS_CONFIRMED, STATUS_STALE)
+            and track.observations >= self.confirm_observations
+        )
+
     def _new_track(self, det: SourceDetection, now_s: float) -> TrackedSource:
         track_id = f"src_{self._next_id}"
         self._next_id += 1
@@ -194,6 +225,7 @@ class SourceTrackerCore:
             confidence=det.confidence,
             observations=1,
             last_seen_s=now_s,
+            last_update_s=now_s,
             covariance_xx=2.0,
             covariance_yy=2.0,
         )
@@ -202,7 +234,7 @@ class SourceTrackerCore:
 
     def _update_track(self, track: TrackedSource, det: SourceDetection, now_s: float) -> None:
         n = max(1, track.observations)
-        alpha = min(0.6, 1.0 / (n + 1.0))
+        alpha = max(self.update_alpha_min, min(0.6, 1.0 / (n + 1.0)))
         track.x = (1.0 - alpha) * track.x + alpha * det.x
         track.y = (1.0 - alpha) * track.y + alpha * det.y
         track.strength = max(track.strength * 0.9, det.strength)
@@ -211,6 +243,7 @@ class SourceTrackerCore:
         track.observations += 1
         track.consecutive_observations += 1
         track.last_seen_s = now_s
+        track.last_update_s = now_s
         track.existence_probability = min(
             0.99, track.existence_probability + 0.06 + 0.10 * det.confidence
         )
@@ -242,6 +275,8 @@ class SourceTrackerCore:
                 keep.existence_probability = max(keep.existence_probability, drop.existence_probability)
                 keep.observations = total_obs
                 keep.consecutive_observations = max(keep.consecutive_observations, drop.consecutive_observations)
+                keep.last_seen_s = max(keep.last_seen_s, drop.last_seen_s)
+                keep.last_update_s = max(keep.last_update_s, drop.last_update_s)
                 keep.covariance_xx = min(keep.covariance_xx, drop.covariance_xx)
                 keep.covariance_yy = min(keep.covariance_yy, drop.covariance_yy)
                 drop.status = STATUS_SUPPRESSED
@@ -250,7 +285,7 @@ class SourceTrackerCore:
     def _promote_confirmed(self) -> None:
         confirmed_positions = [
             (t.x, t.y) for t in self._tracks.values()
-            if t.status == STATUS_CONFIRMED
+            if self._blocks_duplicate_birth(t)
         ]
         for track in self._tracks.values():
             if track.status not in (STATUS_CANDIDATE, STATUS_CONFIRMED):
@@ -258,7 +293,7 @@ class SourceTrackerCore:
             if track.status == STATUS_CONFIRMED:
                 continue
             near_confirmed = any(
-                math.hypot(track.x - x, track.y - y) < self.duplicate_radius_m
+                math.hypot(track.x - x, track.y - y) <= self.duplicate_radius_m
                 for x, y in confirmed_positions
             )
             if near_confirmed:
@@ -267,6 +302,7 @@ class SourceTrackerCore:
             if (
                 track.existence_probability >= self.confirm_probability
                 and track.observations >= self.confirm_observations
+                and track.consecutive_observations >= self.confirm_observations
                 and cov_ok
             ):
                 track.status = STATUS_CONFIRMED
@@ -275,11 +311,15 @@ class SourceTrackerCore:
     def _suppress_duplicates(self) -> None:
         confirmed = [
             t for t in self._tracks.values()
-            if t.status == STATUS_CONFIRMED
+            if self._blocks_duplicate_birth(t)
         ]
         for track in self._tracks.values():
-            if track.status == STATUS_CONFIRMED:
+            if self._blocks_duplicate_birth(track):
                 continue
-            if any(math.hypot(track.x - c.x, track.y - c.y) < self.duplicate_radius_m for c in confirmed):
+            if any(
+                c.track_id != track.track_id
+                and math.hypot(track.x - c.x, track.y - c.y) <= self.duplicate_radius_m
+                for c in confirmed
+            ):
                 track.status = STATUS_SUPPRESSED
                 track.existence_probability = min(track.existence_probability, 0.05)

@@ -27,8 +27,10 @@ test_thermal_system.py — 热导航算法综合测试套件
 
 import sys
 import time
+import importlib.util
 import math
 import unittest
+import xml.etree.ElementTree as ET
 import numpy as np
 from pathlib import Path
 from typing import Tuple, List, Dict
@@ -44,7 +46,11 @@ for rel in [
         sys.path.insert(0, path)
 
 from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
-from thermal_motion_controller.planning import PlannerSource, select_information_gain_target
+from thermal_motion_controller.planning import (
+    PlannerSource,
+    select_exploration_sector_yaw,
+    select_information_gain_target,
+)
 from thermal_motion_controller.source_tracking import SourceDetection, SourceTrackerCore
 from thermal_sensor_sim.scenario import default_config_b_scenario, load_scenario_file
 
@@ -380,6 +386,221 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual(target.reason, 'source_verify')
         self.assertLess(math.hypot(target.x-candidate.x, target.y-candidate.y), 2.0)
+
+    def test_T_PY14_tracker_suppresses_residual_lobe_near_confirmed_source(self):
+        """T-PY14: 已确认源附近的残余热峰应被 suppress，避免重复牵引 planner."""
+        tracker = SourceTrackerCore(
+            confirm_observations=5,
+            confirm_covariance_max=1.0,
+            duplicate_radius_m=2.5,
+        )
+        for i in range(6):
+            tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        tracker.update([SourceDetection(x=2.4, y=0.0, strength=12.0, confidence=0.9)], now_s=7.0)
+        confirmed = [t for t in tracker.tracks if t.status == 'confirmed']
+        active_residuals = [
+            t for t in tracker.tracks
+            if math.hypot(t.x-2.4, t.y) < 0.2 and t.status != 'suppressed'
+        ]
+        self.assertEqual(len(confirmed), 1)
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(active_residuals, [])
+
+    def test_T_PY15_stale_confirmed_source_blocks_duplicate_birth(self):
+        """T-PY15: confirmed 源 stale 后仍作为排斥记忆，不能重复 confirmed."""
+        tracker = SourceTrackerCore(
+            confirm_observations=5,
+            confirm_covariance_max=1.0,
+            duplicate_radius_m=2.5,
+            stale_after_s=2.0,
+            stale_decay_s=2.0,
+        )
+        for i in range(6):
+            tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        tracker.update([], now_s=10.0)
+        self.assertEqual(tracker.tracks[0].status, 'stale')
+        for i in range(11, 17):
+            tracker.update([SourceDetection(x=1.5, y=0.0, strength=16.0, confidence=0.9)], now_s=float(i))
+        confirmed = [t for t in tracker.tracks if t.status == 'confirmed']
+        self.assertEqual(len(confirmed), 0)
+        self.assertEqual(len(tracker.tracks), 1)
+
+    def test_T_PY16_tracker_counts_one_observation_per_map_update(self):
+        """T-PY16: 同一张热图的相邻峰不能把一个 track 瞬间刷到 confirmed."""
+        tracker = SourceTrackerCore(confirm_observations=5, confirm_covariance_max=1.0)
+        tracker.update([
+            SourceDetection(x=1.0 + 0.05 * i, y=2.0, strength=18.0, confidence=0.9)
+            for i in range(8)
+        ], now_s=0.0)
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(tracker.tracks[0].observations, 1)
+        self.assertEqual(tracker.tracks[0].status, 'candidate')
+        for i in range(1, 6):
+            tracker.update([SourceDetection(x=1.0, y=2.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
+
+    def test_T_PY17_tracker_follows_dynamic_source_after_many_observations(self):
+        """T-PY17: 动态源长时间观测后仍要跟随当前位置，不能冻结在初始峰位."""
+        tracker = SourceTrackerCore(
+            confirm_observations=5,
+            confirm_covariance_max=1.0,
+            update_alpha_min=0.08,
+        )
+        for i in range(80):
+            x = -4.0 + 0.05 * i
+            tracker.update([SourceDetection(x=x, y=2.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        track = tracker.tracks[0]
+        expected_x = -4.0 + 0.05 * 79
+        self.assertEqual(track.status, 'confirmed')
+        self.assertLess(abs(track.x - expected_x), 0.8)
+
+    def test_T_PY18_tracker_ignores_stale_map_hotspots_for_dynamic_sources(self):
+        """T-PY18: 动态场景不能从过期热图峰继续生成当前源检测."""
+        temp = np.full((12, 12), 22.0, dtype=np.float32)
+        conf = np.full((12, 12), 0.9, dtype=np.float32)
+        age = np.full((12, 12), 30.0, dtype=np.float32)
+        temp[6, 6] = 40.0
+        tracker = SourceTrackerCore(max_detection_age_s=5.0)
+        stale = tracker.extract_detections(temp, conf, 0.25, -1.5, -1.5, age)
+        self.assertEqual(stale, [])
+        age[6, 6] = 1.0
+        fresh = tracker.extract_detections(temp, conf, 0.25, -1.5, -1.5, age)
+        self.assertEqual(len(fresh), 1)
+
+    def test_T_PY19_information_gain_directional_bias(self):
+        """T-PY19: departure 方向偏置能打破未知区域同分，优先远离已确认源."""
+        width = height = 64
+        variance = np.ones((height, width), dtype=np.float32)
+        confidence = np.zeros((height, width), dtype=np.float32)
+        visits = np.zeros((height, width), dtype=np.float32)
+        age = np.full((height, width), -1.0, dtype=np.float32)
+        target = select_information_gain_target(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=0.25,
+            origin_x=-8.0, origin_y=-8.0,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            source_estimates=[],
+            known_sources=[(-1.0, 0.0)],
+            min_d=3.0,
+            max_d=6.0,
+            safe_dist=2.0,
+            preferred_yaw=0.0,
+            directional_weight=1.0,
+        )
+        self.assertIsNotNone(target)
+        self.assertGreater(target.x, 3.0)
+        self.assertLess(abs(target.y), 3.0)
+
+    def test_T_PY20_sector_yaw_uses_map_evidence_not_fixed_order(self):
+        """T-PY20: 扇区方向由不确定/覆盖证据决定，而不是固定场景方向表."""
+        width = height = 80
+        variance = np.ones((height, width), dtype=np.float32)
+        confidence = np.full((height, width), 0.8, dtype=np.float32)
+        visits = np.full((height, width), 8.0, dtype=np.float32)
+        age = np.zeros((height, width), dtype=np.float32)
+        origin_x = origin_y = -10.0
+        resolution = 0.25
+        yy, xx = np.mgrid[0:height, 0:width]
+        wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
+        wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
+        # Only the northeast sector is under-observed and stale.
+        mask_ne = (wx > 3.0) & (wy > 3.0)
+        confidence[mask_ne] = 0.05
+        visits[mask_ne] = 0.0
+        age[mask_ne] = 80.0
+        sector = select_exploration_sector_yaw(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=resolution,
+            origin_x=origin_x, origin_y=origin_y,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            known_sources=[(-2.0, 0.0)],
+            min_d=2.0,
+            max_d=8.0,
+            safe_dist=2.0,
+            phase_yaw=math.pi,
+            num_sectors=16,
+        )
+        self.assertIsNotNone(sector)
+        self.assertLess(abs(math.atan2(math.sin(sector.yaw - math.pi / 4.0),
+                                       math.cos(sector.yaw - math.pi / 4.0))), math.radians(35.0))
+
+    def test_T_PY21_dynamic_scenario_files_load_and_move(self):
+        """T-PY21: 多情景 YAML 覆盖静态、线性、环形、出现/消失、随机/航点运动."""
+        scenario_dir = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios'
+        scenario_paths = sorted(scenario_dir.glob('*.yaml'))
+        self.assertGreaterEqual(len(scenario_paths), 5)
+        moved = 0
+        intermittent = 0
+        for path in scenario_paths:
+            scenario = load_scenario_file(str(path), num_sources=3)
+            self.assertEqual(len(scenario.sources), 3, path.name)
+            states0 = scenario.all_states(0.0)
+            states60 = scenario.all_states(60.0)
+            for src0, src60 in zip(states0, states60):
+                if math.hypot(src60.x-src0.x, src60.y-src0.y) > 0.25:
+                    moved += 1
+                if src0.active != src60.active:
+                    intermittent += 1
+                self.assertGreaterEqual(src60.amplitude, 0.0)
+                self.assertGreater(src60.sigma_m, 0.0)
+        self.assertGreaterEqual(moved, 4)
+        self.assertGreaterEqual(intermittent, 1)
+
+    def test_T_PY22_world_files_parse_and_launch_selects_world_file(self):
+        """T-PY22: 多仿真 world 资产可解析，launch 支持按 world_file 切换."""
+        world_dir = WORKSPACE / 'src/thermal_robot/thermal_bringup/worlds'
+        expected = {
+            'thermal_scene_nav.world',
+            'thermal_scene_obstacle_field.world',
+            'thermal_scene_corridor_rooms.world',
+            'thermal_scene_mixed_rooms.world',
+        }
+        paths = {path.name: path for path in world_dir.glob('*.world')}
+        self.assertTrue(expected.issubset(paths.keys()))
+
+        signatures = set()
+        for name in expected:
+            root = ET.parse(paths[name]).getroot()
+            self.assertEqual(root.tag, 'sdf')
+            world = root.find('world')
+            self.assertIsNotNone(world, name)
+            model_names = tuple(sorted(model.attrib.get('name', '') for model in world.findall('model')))
+            collision_count = len(root.findall('.//collision'))
+            signatures.add((model_names, collision_count))
+            if name != 'thermal_scene_nav.world':
+                self.assertGreater(collision_count, 0, name)
+        self.assertGreaterEqual(len(signatures), 4)
+
+        launch_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/launch/sim_nav_slam_launch.py'
+        launch_text = launch_path.read_text()
+        self.assertIn("LaunchConfiguration('world_file'", launch_text)
+        self.assertIn("DeclareLaunchArgument('world_file'", launch_text)
+
+    def test_T_PY23_matrix_runner_covers_world_scenario_combinations(self):
+        """T-PY23: 闭环运行脚本覆盖多个 world 与多个 thermal scenario 的组合."""
+        runner_path = WORKSPACE / 'src/thermal_robot/scripts/run_multiscenario_matrix.py'
+        spec = importlib.util.spec_from_file_location('run_multiscenario_matrix', runner_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        representative_worlds = {case.world.name for case in module.REPRESENTATIVE_CASES}
+        representative_scenarios = {case.scenario.name for case in module.REPRESENTATIVE_CASES}
+        self.assertGreaterEqual(len(representative_worlds), 4)
+        self.assertGreaterEqual(len(representative_scenarios), 4)
+
+        full_cases = module._full_cases()
+        full_worlds = {case.world.name for case in full_cases}
+        full_scenarios = {case.scenario.name for case in full_cases}
+        self.assertGreaterEqual(len(full_worlds), 4)
+        self.assertGreaterEqual(len(full_scenarios), 6)
+        self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,22 @@
+name: static_offset_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: S1_north
+    xy: [-3.0, 6.0]
+    amplitude: 28.0
+    sigma_m: 1.0
+    motion: static
+  - id: S2_east
+    xy: [4.5, 1.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: static
+  - id: S3_southwest
+    xy: [-7.0, -4.5]
+    amplitude: 18.0
+    sigma_m: 0.8
+    motion: static

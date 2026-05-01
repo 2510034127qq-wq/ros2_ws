@@ -1,0 +1,25 @@
+name: dynamic_appear_disappear_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: A1_persistent
+    xy: [-2.0, 3.0]
+    amplitude: 29.0
+    sigma_m: 1.0
+    motion: static
+  - id: A2_intermittent
+    xy: [4.0, -2.0]
+    amplitude: 25.0
+    sigma_m: 0.9
+    motion: appear_disappear
+    motion_params: {period_s: 50.0, duty_cycle: 0.55, phase_s: 10.0}
+  - id: A3_late
+    xy: [-6.0, -4.5]
+    amplitude: 19.0
+    sigma_m: 0.8
+    motion: static
+    active_schedule:
+      - {start: 35.0, end: 180.0}
