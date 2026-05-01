@@ -85,11 +85,73 @@ appear/disappear, and random-walk source motion plus optional strength drift.
 The online controller does not subscribe to `/sim/thermal_sources_truth`; that
 topic is for collector and benchmark evaluation only.
 
-The Gazebo world, scenario file, and `sensor_node.py` fallback must stay consistent:
+## World and Dynamic Scenario Selection
+
+`sim_nav_slam_launch.py` accepts two independent test axes:
+
+- `world_file`: Gazebo geometry, obstacles, rooms, and corridors.
+- `scenario_file`: thermal source positions, dynamics, appearance schedules, and strength drift.
+
+Default launch behavior is unchanged. If `world_file` and `scenario_file` are
+omitted, the launch uses `thermal_scene_nav.world` and the Config-B fallback.
+
+Available worlds:
 
 ```text
-thermal_bringup/worlds/thermal_scene_nav.world
-thermal_sensor_sim/thermal_sensor_sim/sensor_node.py
+thermal_scene_nav.world              open baseline world
+thermal_scene_obstacle_field.world   obstacle-field world
+thermal_scene_corridor_rooms.world   corridor and rooms world
+thermal_scene_mixed_rooms.world      mixed rooms and obstacle world
+```
+
+Available dynamic thermal scenarios:
+
+```text
+config_b_sources.yaml
+static_offset_sources.yaml
+dynamic_linear_sources.yaml
+dynamic_circular_sources.yaml
+dynamic_appear_disappear_sources.yaml
+dynamic_waypoint_random_sources.yaml
+```
+
+Manual world/scenario selection example:
+
+```bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py \
+  use_rviz:=true \
+  use_gzclient:=true \
+  world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_obstacle_field.world \
+  scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/dynamic_linear_sources.yaml
+```
+
+Representative multi-world closed-loop test matrix:
+
+```bash
+python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
+  --preset representative \
+  --out-root /tmp/thermal_world_scenario_matrix_manual \
+  --duration 90 \
+  --warmup 36 \
+  --min-recall 0.333
+```
+
+Full matrix across all configured worlds and scenarios:
+
+```bash
+python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
+  --preset full \
+  --out-root /tmp/thermal_world_scenario_matrix_full \
+  --duration 90 \
+  --warmup 36 \
+  --min-recall 0.333
+```
+
+Single explicit matrix case:
+
+```bash
+python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
+  --case test1:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_corridor_rooms.world:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/dynamic_appear_disappear_sources.yaml
 ```
 
 ## Build
@@ -160,6 +222,16 @@ Headless run:
 
 ```bash
 ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=false use_gzclient:=false
+```
+
+Headless run with an explicit world/scenario pair:
+
+```bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py \
+  use_rviz:=false \
+  use_gzclient:=false \
+  world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_mixed_rooms.world \
+  scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/dynamic_waypoint_random_sources.yaml
 ```
 
 Startup timing:
