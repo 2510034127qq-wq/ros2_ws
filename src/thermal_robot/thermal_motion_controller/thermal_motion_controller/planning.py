@@ -135,6 +135,174 @@ def select_information_gain_target(
     )
 
 
+def select_coverage_ring_target(
+    robot_wx: float,
+    robot_wy: float,
+    width: int,
+    height: int,
+    resolution: float,
+    origin_x: float,
+    origin_y: float,
+    temperature_variance: np.ndarray,
+    confidence: np.ndarray,
+    visit_count: np.ndarray,
+    last_seen_age_s: np.ndarray,
+    source_estimates: Sequence[PlannerSource] = (),
+    known_sources: Sequence[Tuple[float, float]] = (),
+    min_radius: float = 4.0,
+    max_radius: float = 9.0,
+    safe_dist: float = 2.3,
+    weights: PlannerWeights = PlannerWeights(),
+    preferred_yaw: Optional[float] = None,
+    directional_weight: float = 0.0,
+    footprint_radius: float = 3.0,
+    num_angles: int = 24,
+    num_rings: int = 3,
+    recent_yaws: Sequence[float] = (),
+    recent_yaw_penalty: float = 0.0,
+    anchor_x: Optional[float] = None,
+    anchor_y: Optional[float] = None,
+    min_travel_d: Optional[float] = None,
+    max_travel_d: Optional[float] = None,
+) -> Optional[PlannerTarget]:
+    """Select a medium-range sweep target by expected FOV information gain.
+
+    Cell-wise frontiers can over-focus on a single high-scoring map cell.  This
+    routine scores where the robot's next thermal view footprint would land, so
+    a target is valuable only if it exposes an under-observed local area while
+    staying clear of already confirmed sources.
+    """
+    if width <= 0 or height <= 0 or resolution <= 0.0:
+        return None
+    if max_radius < min_radius or num_angles <= 0 or num_rings <= 0:
+        return None
+
+    variance = _reshape(temperature_variance, height, width)
+    conf = _reshape(confidence, height, width)
+    visits = _reshape(visit_count, height, width).astype(np.float32)
+    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
+    wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
+
+    var_norm = _norm_clip(variance)
+    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
+    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
+    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
+    coverage_gain = 1.0 / (1.0 + visits)
+
+    source_probability = np.zeros((height, width), dtype=np.float32)
+    for src in source_estimates:
+        if src.status in ("suppressed", "stale"):
+            continue
+        spread = 1.8 if src.status == "candidate" else 1.2
+        d = np.sqrt((wx - src.x) ** 2 + (wy - src.y) ** 2)
+        amp = max(0.0, min(1.0, src.probability)) * max(0.25, min(1.0, src.confidence or src.probability))
+        source_probability = np.maximum(source_probability, amp * np.exp(-0.5 * (d / spread) ** 2))
+
+    duplicate_cell = np.zeros((height, width), dtype=np.float32)
+    for sx, sy in known_sources:
+        d = np.sqrt((wx - sx) ** 2 + (wy - sy) ** 2)
+        duplicate_cell = np.maximum(duplicate_cell, np.exp(-0.5 * (d / max(safe_dist, 0.25)) ** 2))
+
+    cell_value = (
+        weights.information_gain * information_gain
+        + weights.source_probability * source_probability
+        + weights.coverage_gain * coverage_gain
+        - weights.duplicate_penalty * duplicate_cell
+    )
+
+    ax = robot_wx if anchor_x is None else float(anchor_x)
+    ay = robot_wy if anchor_y is None else float(anchor_y)
+    base_yaw = 0.0 if preferred_yaw is None else float(preferred_yaw)
+    footprint_radius = max(float(footprint_radius), resolution)
+    map_min_x = origin_x
+    map_min_y = origin_y
+    map_max_x = origin_x + width * resolution
+    map_max_y = origin_y + height * resolution
+    min_travel = 0.0 if min_travel_d is None else float(min_travel_d)
+    max_travel = float("inf") if max_travel_d is None else float(max_travel_d)
+
+    best: Optional[PlannerTarget] = None
+    radii = np.linspace(float(min_radius), float(max_radius), max(1, int(num_rings)))
+    for radius in radii:
+        for idx in range(int(num_angles)):
+            yaw = _wrap_angle(base_yaw + idx * 2.0 * math.pi / float(num_angles))
+            tx = ax + float(radius) * math.cos(yaw)
+            ty = ay + float(radius) * math.sin(yaw)
+            if tx < map_min_x or tx > map_max_x or ty < map_min_y or ty > map_max_y:
+                continue
+            travel_d = math.hypot(tx - robot_wx, ty - robot_wy)
+            if travel_d < min_travel or travel_d > max_travel:
+                continue
+
+            duplicate_target = 0.0
+            too_close = False
+            for sx, sy in known_sources:
+                d_src = math.hypot(tx - sx, ty - sy)
+                if d_src < safe_dist:
+                    too_close = True
+                    break
+                duplicate_target = max(
+                    duplicate_target,
+                    math.exp(-0.5 * (d_src / max(safe_dist, 0.25)) ** 2),
+                )
+            if too_close:
+                continue
+
+            footprint = ((wx - tx) ** 2 + (wy - ty) ** 2) <= footprint_radius ** 2
+            for sx, sy in known_sources:
+                footprint &= ((wx - sx) ** 2 + (wy - sy) ** 2) >= safe_dist ** 2
+            if not np.any(footprint):
+                continue
+
+            values = cell_value[footprint]
+            cutoff = float(np.percentile(values, 75.0))
+            top = values[values >= cutoff]
+            top_mean = float(np.mean(top)) if top.size else float(np.mean(values))
+            mean_value = float(np.mean(values))
+            uncertain_area = float(np.mean(
+                (unseen[footprint] > 0.35)
+                | (coverage_gain[footprint] > 0.5)
+                | (age_norm[footprint] > 0.5)
+            ))
+            fov_gain = 0.62 * top_mean + 0.25 * mean_value + 0.13 * uncertain_area
+
+            directional_gain = 0.0
+            if preferred_yaw is not None and directional_weight > 0.0:
+                directional_gain = 0.5 + 0.5 * math.cos(_wrap_angle(yaw - float(preferred_yaw)))
+
+            recent_penalty = 0.0
+            if recent_yaw_penalty > 0.0:
+                for recent_yaw in recent_yaws:
+                    align = 0.5 + 0.5 * math.cos(_wrap_angle(yaw - float(recent_yaw)))
+                    recent_penalty = max(recent_penalty, align * align)
+
+            edge_m = min(tx - map_min_x, map_max_x - tx, ty - map_min_y, map_max_y - ty)
+            edge_penalty = max(0.0, 1.0 - edge_m / max(footprint_radius, resolution))
+            travel_cost = min(1.0, travel_d / max(max_travel if math.isfinite(max_travel) else max_radius, 1e-3))
+            score = (
+                fov_gain
+                + float(directional_weight) * directional_gain
+                - 0.25 * travel_cost
+                - weights.duplicate_penalty * duplicate_target
+                - weights.risk_penalty * edge_penalty
+                - float(recent_yaw_penalty) * recent_penalty
+            )
+
+            source_peak = float(np.max(source_probability[footprint])) if np.any(footprint) else 0.0
+            if source_peak > 0.15:
+                reason = "source_verify_ring"
+            elif anchor_x is not None or anchor_y is not None:
+                reason = "annular_coverage"
+            else:
+                reason = "coverage_ring"
+            if best is None or score > best.score:
+                best = PlannerTarget(x=float(tx), y=float(ty), score=float(score), reason=reason)
+    return best
+
+
 def select_exploration_sector_yaw(
     robot_wx: float,
     robot_wy: float,

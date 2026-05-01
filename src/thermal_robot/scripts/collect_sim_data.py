@@ -515,12 +515,14 @@ class DataCollector(Node):
                         best_d = d
                         best_truth = truth
                         best_est = est
-            if best_id is not None and best_d <= 1.5:
+            match_radius = self._source_match_radius(best_truth, best_est)
+            if best_id is not None and best_d <= match_radius:
                 used_est.add(best_id)
                 matches.append({
                     'truth_id': tid,
                     'estimate_id': best_id,
                     'error_m': round(best_d, 3),
+                    'match_radius_m': round(match_radius, 3),
                     'time_s': round(first_confirmed_t.get(best_id, best_est['t'] if best_est else 0.0), 3),
                     'truth_x': round(best_truth['x'], 3) if best_truth else None,
                     'truth_y': round(best_truth['y'], 3) if best_truth else None,
@@ -552,6 +554,13 @@ class DataCollector(Node):
             },
             'duration_s': round(duration, 3),
         }
+
+    @staticmethod
+    def _source_match_radius(truth: dict | None, estimate: dict | None) -> float:
+        """Evaluation-only radius scaled by source extent, not used by control."""
+        truth_sigma = float((truth or {}).get('sigma', 0.0) or 0.0)
+        estimate_sigma = float((estimate or {}).get('sigma', 0.0) or 0.0)
+        return max(1.5, 2.0 * truth_sigma, 2.0 * estimate_sigma)
 
     def _truth_sources_snapshot(self) -> list:
         latest = {}

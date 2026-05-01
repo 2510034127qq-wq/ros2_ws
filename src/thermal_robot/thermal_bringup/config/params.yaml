@@ -138,7 +138,7 @@ controller_node:
 
     # ── v26 Post-Confirm Exploration Boost ──────────────────────────────────
     post_confirm_rounds:       10     # 确认源后强制远场探索的轮数
-    post_confirm_min_d:         7.0   # boost期间frontier最小距离
+    post_confirm_min_d:         5.0   # boost期间frontier最小距离
     post_confirm_dist_sigma:   15.0   # boost期间距离衰减sigma
     levy_post_confirm_step:    10.0   # 确认后定向Lévy步长
     post_confirm_departure_dist: 9.0
@@ -168,6 +168,16 @@ controller_node:
     post_confirm_guard_near_dist:     6.0
     departure_directional_weight:     0.55
     coverage_directional_weight:      0.65
+    coverage_ring_min_d:              4.0
+    coverage_ring_max_d:              9.0
+    coverage_ring_fov_radius:         3.0
+    coverage_ring_angles:             24
+    coverage_ring_rings:              3
+    coverage_recent_yaw_penalty:      0.45
+    coverage_recent_yaw_window:       5
+    nav2_progress_timeout_s:          8.0
+    nav2_progress_min_delta:          0.35
+    nav2_stall_direct_s:             12.0
 
     # ── World-map information-gain planner ─────────────────────────────────
     planner_information_gain_weight:       1.0

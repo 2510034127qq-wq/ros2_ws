@@ -97,11 +97,16 @@ class SourceTrackerCore:
         conf = np.asarray(confidence, dtype=np.float32)
         if temp.ndim != 2 or conf.shape != temp.shape or temp.size == 0:
             return []
+        freshness = np.ones_like(temp, dtype=np.float32)
         hot = (temp >= self.ambient_temp + self.min_temp_rise) & (conf >= self.min_confidence)
         if last_seen_age_s is not None and math.isfinite(self.max_detection_age_s):
             age = np.asarray(last_seen_age_s, dtype=np.float32)
             if age.shape == temp.shape:
                 hot &= (age >= 0.0) & (age <= self.max_detection_age_s)
+                freshness = np.exp(
+                    -np.clip(age, 0.0, self.max_detection_age_s)
+                    / max(self.max_detection_age_s, 1e-3)
+                ).astype(np.float32)
         if temp.shape[0] >= 3 and temp.shape[1] >= 3:
             center = temp[1:-1, 1:-1]
             local = np.ones_like(center, dtype=bool)
@@ -117,7 +122,7 @@ class SourceTrackerCore:
         ys, xs = np.where(hot)
         if len(xs) == 0:
             return []
-        scores = (temp[ys, xs] - self.ambient_temp) * conf[ys, xs]
+        scores = (temp[ys, xs] - self.ambient_temp) * conf[ys, xs] * freshness[ys, xs]
         order = np.argsort(scores)[::-1]
         detections: List[SourceDetection] = []
         for idx in order[: self.max_detections * 3]:
@@ -127,7 +132,7 @@ class SourceTrackerCore:
                 x=x,
                 y=y,
                 strength=float(temp[ys[idx], xs[idx]] - self.ambient_temp),
-                confidence=float(conf[ys[idx], xs[idx]]),
+                confidence=float(conf[ys[idx], xs[idx]] * freshness[ys[idx], xs[idx]]),
                 sigma=max(float(resolution) * 2.0, 0.5),
             )
             if any(math.hypot(det.x - prev.x, det.y - prev.y) < self.merge_radius_m for prev in detections):

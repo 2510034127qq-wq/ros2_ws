@@ -62,6 +62,7 @@ from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMa
 from thermal_motion_controller.planning import (
     PlannerSource,
     PlannerWeights,
+    select_coverage_ring_target,
     select_exploration_sector_yaw,
     select_information_gain_target,
 )
@@ -329,6 +330,16 @@ class ControllerNode(Node):
         self.declare_parameter('post_confirm_guard_near_dist', 6.0)
         self.declare_parameter('departure_directional_weight', 0.55)
         self.declare_parameter('coverage_directional_weight', 0.65)
+        self.declare_parameter('coverage_ring_min_d', 4.0)
+        self.declare_parameter('coverage_ring_max_d', 9.0)
+        self.declare_parameter('coverage_ring_fov_radius', 3.0)
+        self.declare_parameter('coverage_ring_angles', 24)
+        self.declare_parameter('coverage_ring_rings', 3)
+        self.declare_parameter('coverage_recent_yaw_penalty', 0.45)
+        self.declare_parameter('coverage_recent_yaw_window', 5)
+        self.declare_parameter('nav2_progress_timeout_s', 8.0)
+        self.declare_parameter('nav2_progress_min_delta', 0.35)
+        self.declare_parameter('nav2_stall_direct_s', 12.0)
 
         # ── Read parameters ───────────────────────────────────────────────
         g = self.get_parameter
@@ -434,6 +445,16 @@ class ControllerNode(Node):
         self._pc_guard_near_dist = float(g('post_confirm_guard_near_dist').value)
         self._departure_directional_weight = float(g('departure_directional_weight').value)
         self._coverage_directional_weight = float(g('coverage_directional_weight').value)
+        self._coverage_ring_min_d = float(g('coverage_ring_min_d').value)
+        self._coverage_ring_max_d = float(g('coverage_ring_max_d').value)
+        self._coverage_ring_fov_radius = float(g('coverage_ring_fov_radius').value)
+        self._coverage_ring_angles = int(g('coverage_ring_angles').value)
+        self._coverage_ring_rings = int(g('coverage_ring_rings').value)
+        self._coverage_recent_yaw_penalty = float(g('coverage_recent_yaw_penalty').value)
+        self._coverage_recent_yaw_window = max(1, int(g('coverage_recent_yaw_window').value))
+        self._nav2_progress_timeout_s = float(g('nav2_progress_timeout_s').value)
+        self._nav2_progress_min_delta = float(g('nav2_progress_min_delta').value)
+        self._nav2_stall_direct_s = float(g('nav2_stall_direct_s').value)
 
         self._pre_pk_thresh = self._pre_pk_ratio * self._pk_tdelta
 
@@ -517,6 +538,7 @@ class ControllerNode(Node):
         self._survey_buf: List[float] = []
         self._survey_t_start: Optional[float] = None
         self._coarse_wp_count: int = 0
+        self._coverage_recent_yaws: deque = deque(maxlen=self._coverage_recent_yaw_window)
 
         # ── Cold field detection ──────────────────────────────────────────
         self._frontier_cold_start: Optional[float] = None
@@ -551,6 +573,10 @@ class ControllerNode(Node):
         self._nav2_last_send_t: float           = 0.0
         self._nav2_ready: bool = False
         self._nav2_check_t: float = 0.0
+        self._nav2_progress_goal = None
+        self._nav2_progress_best_d = float('inf')
+        self._nav2_progress_t = 0.0
+        self._nav2_direct_until = 0.0
 
         # ── QoS ──────────────────────────────────────────────────────────
         be = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -655,6 +681,8 @@ class ControllerNode(Node):
             return False
 
         now = time.monotonic()
+        if now < self._nav2_direct_until:
+            return False
 
         # Already navigating to same goal
         if self._nav2_state == NAV2_ACTIVE and self._nav2_current_goal is not None:
@@ -736,6 +764,38 @@ class ControllerNode(Node):
         self._nav2_state        = NAV2_IDLE
         self._nav2_goal_handle  = None
         self._nav2_current_goal = None
+        self._nav2_progress_goal = None
+        self._nav2_progress_best_d = float('inf')
+        self._nav2_progress_t = 0.0
+
+    def _nav2_progress_stalled(self, tx: float, ty: float, now: float, label: str) -> bool:
+        """Return true after cancelling Nav2 if an active goal stops making progress."""
+        if self._nav2_state != NAV2_ACTIVE:
+            self._nav2_progress_goal = None
+            self._nav2_progress_best_d = float('inf')
+            self._nav2_progress_t = 0.0
+            return False
+        dist = math.hypot(tx - self._wx, ty - self._wy)
+        goal_key = (label, round(tx, 1), round(ty, 1))
+        if self._nav2_progress_goal != goal_key:
+            self._nav2_progress_goal = goal_key
+            self._nav2_progress_best_d = dist
+            self._nav2_progress_t = now
+            return False
+        if dist <= self._nav2_progress_best_d - self._nav2_progress_min_delta:
+            self._nav2_progress_best_d = dist
+            self._nav2_progress_t = now
+            return False
+        if (now - self._nav2_progress_t) < self._nav2_progress_timeout_s:
+            return False
+
+        self._nav2_direct_until = now + self._nav2_stall_direct_s
+        self.get_logger().warn(
+            f'[NAV2_STALL/{label}] no progress for {now-self._nav2_progress_t:.1f}s '
+            f'd={dist:.1f}m best={self._nav2_progress_best_d:.1f}m '
+            f'→ direct fallback {self._nav2_stall_direct_s:.0f}s')
+        self._cancel_nav2_goal()
+        return True
 
     # ────────────────────────────────────────────────────────────────────────
     # Sensor callbacks (unchanged from v30)
@@ -1046,6 +1106,57 @@ class ControllerNode(Node):
             return None
         return target.x, target.y, target.score, target.reason
 
+    def _map_coverage_ring(
+        self,
+        min_radius=None,
+        max_radius=None,
+        safe_dist=None,
+        preferred_yaw=None,
+        directional_weight=0.0,
+        anchor=None,
+        min_travel_d=None,
+        max_travel_d=None,
+    ):
+        if not self._map_available():
+            return None
+        m = self._thermal_map
+        target = select_coverage_ring_target(
+            robot_wx=self._wx,
+            robot_wy=self._wy,
+            width=m['width'],
+            height=m['height'],
+            resolution=m['resolution'],
+            origin_x=m['origin_x'],
+            origin_y=m['origin_y'],
+            temperature_variance=m['temperature_variance'],
+            confidence=m['confidence'],
+            visit_count=m['visit_count'],
+            last_seen_age_s=m['last_seen_age_s'],
+            source_estimates=self._planner_sources(),
+            known_sources=self._known_source_positions(),
+            min_radius=self._coverage_ring_min_d if min_radius is None else min_radius,
+            max_radius=self._coverage_ring_max_d if max_radius is None else max_radius,
+            safe_dist=self._safe_dist() if safe_dist is None else safe_dist,
+            weights=self._planner_weights,
+            preferred_yaw=preferred_yaw,
+            directional_weight=directional_weight,
+            footprint_radius=self._coverage_ring_fov_radius,
+            num_angles=max(8, self._coverage_ring_angles),
+            num_rings=max(1, self._coverage_ring_rings),
+            recent_yaws=tuple(self._coverage_recent_yaws),
+            recent_yaw_penalty=self._coverage_recent_yaw_penalty,
+            anchor_x=None if anchor is None else anchor[0],
+            anchor_y=None if anchor is None else anchor[1],
+            min_travel_d=min_travel_d,
+            max_travel_d=max_travel_d,
+        )
+        if target is None:
+            return None
+        return target.x, target.y, target.score, target.reason
+
+    def _remember_coverage_yaw(self, tx: float, ty: float):
+        self._coverage_recent_yaws.append(math.atan2(ty - self._wy, tx - self._wx))
+
     def _map_region_novelty(self, radius=5.0):
         if not self._map_available():
             return self._bmap.region_novelty(self._wx, self._wy, radius=radius)
@@ -1262,7 +1373,7 @@ class ControllerNode(Node):
         planner_sources = self._planner_sources()
         pref_yaw = None
         dir_w = 0.0
-        if not ksrc and not planner_sources:
+        if not planner_sources:
             sector = self._map_sector_yaw(
                 min_d=min_d,
                 max_d=16.0,
@@ -1271,18 +1382,32 @@ class ControllerNode(Node):
             )
             pref_yaw = sector.yaw if sector is not None else self._phase_yaw_for_coverage()
             dir_w = self._coverage_directional_weight
-        ft=self._map_best_frontier(
-            min_d=min_d,
-            max_d=16.0,
-            safe_dist=self._safe_dist(),
-            preferred_yaw=pref_yaw,
-            directional_weight=dir_w,
-        )
+        ft = None
+        if not planner_sources:
+            ft = self._map_coverage_ring(
+                min_radius=max(min_d, self._coverage_ring_min_d),
+                max_radius=min(16.0, self._coverage_ring_max_d),
+                safe_dist=self._safe_dist(),
+                preferred_yaw=pref_yaw,
+                directional_weight=dir_w,
+                min_travel_d=min_d,
+                max_travel_d=16.0,
+            )
+        if ft is None:
+            ft=self._map_best_frontier(
+                min_d=min_d,
+                max_d=16.0,
+                safe_dist=self._safe_dist(),
+                preferred_yaw=pref_yaw,
+                directional_weight=dir_w,
+            )
         if ft is None:
             ft=self._bmap.best_frontier(self._wx,self._wy,min_d=min_d,max_d=16.0,
                 dist_sigma=d_sig,known_sources=ksrc,safe_dist=self._safe_dist())
         if ft is not None:
             fx,fy,sc=ft[0],ft[1],ft[2]; self._frontier_target=(fx,fy)
+            if len(ft) > 3 and ft[3] in ('coverage_ring', 'annular_coverage'):
+                self._remember_coverage_yaw(fx, fy)
             reason=ft[3] if len(ft)>3 else 'belief_fallback'
             self.get_logger().info(
                 f'[FRONTIER/{mode_str}/{reason}] →({fx:.1f},{fy:.1f}) score={sc:.3f} '
@@ -1331,15 +1456,35 @@ class ControllerNode(Node):
 
     def _compute_departure_wp(self) -> Tuple[float, float]:
         cx, cy = self._sources_centroid()
+        departure_min_d = max(4.5, self._excl_r + self._fr_safe_buf + 1.5)
         sector = self._map_sector_yaw(
-            min_d=max(self._pc_min_d, self._excl_r * 2.5),
+            min_d=departure_min_d,
             max_d=max(self._pc_min_d + 2.0, self._departure_dist),
             safe_dist=max(self._survey_safe_dist, self._safe_dist()),
             phase_yaw=self._phase_yaw_away_from_sources(),
         )
         preferred_yaw = sector.yaw if sector is not None else self._phase_yaw_away_from_sources()
+        ring = self._map_coverage_ring(
+            min_radius=max(self._safe_dist() + 1.0, self._coverage_ring_min_d),
+            max_radius=max(self._coverage_ring_max_d, self._departure_dist),
+            safe_dist=max(self._survey_safe_dist, self._safe_dist()),
+            preferred_yaw=preferred_yaw,
+            directional_weight=self._departure_directional_weight,
+            anchor=(cx, cy),
+            min_travel_d=departure_min_d,
+            max_travel_d=max(self._pc_min_d + 2.0, self._departure_dist),
+        )
+        if ring is not None:
+            tx, ty = ring[0], ring[1]
+            self._remember_coverage_yaw(tx, ty)
+            reason = ring[3] if len(ring) > 3 else 'annular_coverage'
+            self.get_logger().info(
+                f'[DEPARTURE_WP/ring/{reason}] centroid=({cx:.1f},{cy:.1f}) '
+                f'sector={math.degrees(preferred_yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
+                f'd_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
+            return (tx, ty)
         ft = self._map_best_frontier(
-            min_d=max(self._pc_min_d, self._excl_r * 2.5),
+            min_d=departure_min_d,
             max_d=max(self._pc_min_d + 2.0, self._departure_dist),
             safe_dist=max(self._survey_safe_dist, self._safe_dist()),
             preferred_yaw=preferred_yaw,
@@ -1435,7 +1580,7 @@ class ControllerNode(Node):
         planner_sources = self._planner_sources()
         pref_yaw = None
         dir_w = 0.0
-        if not ksrc and not planner_sources:
+        if not planner_sources:
             sector = self._map_sector_yaw(
                 min_d=self._survey_wp_min_d,
                 max_d=self._survey_wp_max_d,
@@ -1444,17 +1589,31 @@ class ControllerNode(Node):
             )
             pref_yaw = sector.yaw if sector is not None else self._phase_yaw_for_coverage()
             dir_w = self._coverage_directional_weight
-        ft=self._map_best_frontier(
-            min_d=self._survey_wp_min_d,
-            max_d=self._survey_wp_max_d,
-            safe_dist=self._survey_safe_dist,
-            preferred_yaw=pref_yaw,
-            directional_weight=dir_w)
+        ft = None
+        if not planner_sources:
+            ft = self._map_coverage_ring(
+                min_radius=max(self._survey_wp_min_d, self._coverage_ring_min_d),
+                max_radius=min(self._survey_wp_max_d, self._coverage_ring_max_d),
+                safe_dist=self._survey_safe_dist,
+                preferred_yaw=pref_yaw,
+                directional_weight=dir_w,
+                min_travel_d=self._survey_wp_min_d,
+                max_travel_d=self._survey_wp_max_d,
+            )
+        if ft is None:
+            ft=self._map_best_frontier(
+                min_d=self._survey_wp_min_d,
+                max_d=self._survey_wp_max_d,
+                safe_dist=self._survey_safe_dist,
+                preferred_yaw=pref_yaw,
+                directional_weight=dir_w)
         if ft is None:
             ft=self._bmap.best_frontier(self._wx,self._wy,
                 min_d=self._survey_wp_min_d,max_d=self._survey_wp_max_d,
                 dist_sigma=10.0,heat_prior=0.0,
                 known_sources=ksrc,safe_dist=self._survey_safe_dist)
+        if ft is not None and len(ft) > 3 and ft[3] in ('coverage_ring', 'annular_coverage'):
+            self._remember_coverage_yaw(ft[0], ft[1])
         return (ft[0],ft[1]) if ft is not None else None
 
     def _enter_coarse_survey(self, initial_wp=None, reason='unknown'):
@@ -1546,6 +1705,7 @@ class ControllerNode(Node):
         # Ensures robot always moves, regardless of Nav2 availability.
         tx2, ty2 = self._coarse_wp
         dist2 = math.hypot(tx2 - self._wx, ty2 - self._wy)
+        self._nav2_progress_stalled(tx2, ty2, now, 'coarse')
 
         if self._nav2_state != NAV2_ACTIVE:
             if dist2 > self._frontier_r:
@@ -1986,6 +2146,7 @@ class ControllerNode(Node):
             tx, ty = self._frontier_target
             # Try Nav2 (rate-limited, non-blocking)
             self._send_nav2_goal(tx, ty)
+            self._nav2_progress_stalled(tx, ty, now, 'frontier')
             # Always ensure robot moves this tick
             if self._nav2_state != NAV2_ACTIVE:
                 # Direct navigation fallback (works with or without Nav2)

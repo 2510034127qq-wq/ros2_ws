@@ -22,6 +22,12 @@ def as_float(row, key, default=0.0):
         return default
 
 
+def source_match_radius(truth: dict | None, estimate: dict | None) -> float:
+    truth_sigma = as_float(truth or {}, 'sigma')
+    estimate_sigma = as_float(estimate or {}, 'sigma')
+    return max(1.5, 2.0 * truth_sigma, 2.0 * estimate_sigma)
+
+
 def compute(run_dir: Path) -> dict:
     truth_rows = read_csv(run_dir / 'thermal_sources_truth.csv')
     estimate_rows = read_csv(run_dir / 'source_estimates.csv')
@@ -60,12 +66,14 @@ def compute(run_dir: Path) -> dict:
                     best_d = d
                     best_truth = truth
                     best_est = est
-        if best_id is not None and best_d <= 1.5:
+        match_radius = source_match_radius(best_truth, best_est)
+        if best_id is not None and best_d <= match_radius:
             used.add(best_id)
             matches.append({
                 'truth_id': tid,
                 'estimate_id': best_id,
                 'error_m': round(best_d, 3),
+                'match_radius_m': round(match_radius, 3),
                 'time_s': round(first_t.get(best_id, as_float(best_est, 't')), 3),
                 'truth_x': round(as_float(best_truth, 'x'), 3) if best_truth else None,
                 'truth_y': round(as_float(best_truth, 'y'), 3) if best_truth else None,

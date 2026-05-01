@@ -22,6 +22,13 @@ Gazebo g1_nav model
        COARSE states: Nav2 preferred, direct /cmd_vel fallback
 ```
 
+Global exploration uses `/thermal/map` and `/thermal/sources`, not simulator
+truth.  The planner combines candidate-source verification, information gain,
+coverage gain, confirmed-source exclusion, and a medium-range FOV ring sweep.
+The ring sweep scores where the next thermal camera footprint will land, then
+penalizes recently used directions so post-confirm exploration does not keep
+expanding through the same sector.
+
 The main launch file is:
 
 ```bash
@@ -153,6 +160,20 @@ Single explicit matrix case:
 python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
   --case test1:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_corridor_rooms.world:/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/dynamic_appear_disappear_sources.yaml
 ```
+
+Latest representative evidence from 2026-05-02:
+
+```text
+/tmp/thermal_world_scenario_matrix_ring_representative
+open_config_b       recall=0.667 precision=1.000 duplicate=0
+obstacle_linear     recall=0.667 precision=1.000 duplicate=0
+corridor_appear     recall=0.667 precision=1.000 duplicate=0
+mixed_waypoint      recall=0.667 precision=1.000 duplicate=0
+```
+
+This is a regression gate, not a proof of full generalization.  Use the full
+matrix or add more randomized world/scenario pairs before treating the
+algorithm as broadly validated.
 
 ## Build
 

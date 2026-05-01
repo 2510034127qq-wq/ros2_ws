@@ -48,6 +48,7 @@ for rel in [
 from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
 from thermal_motion_controller.planning import (
     PlannerSource,
+    select_coverage_ring_target,
     select_exploration_sector_yaw,
     select_information_gain_target,
 )
@@ -601,6 +602,110 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertGreaterEqual(len(full_worlds), 4)
         self.assertGreaterEqual(len(full_scenarios), 6)
         self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
+
+    def test_T_PY24_nav2_progress_watchdog_is_configured(self):
+        """T-PY24: Nav2 accepted-but-stalled goals must fall back to direct motion."""
+        controller_path = WORKSPACE / 'src/thermal_robot/thermal_motion_controller/thermal_motion_controller/controller_node.py'
+        params_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/params.yaml'
+        controller_text = controller_path.read_text()
+        params_text = params_path.read_text()
+        self.assertIn('nav2_progress_timeout_s', controller_text)
+        self.assertIn('_nav2_progress_stalled', controller_text)
+        self.assertIn('nav2_stall_direct_s', params_text)
+
+    def test_T_PY25_coverage_ring_prefers_fov_unknown_region(self):
+        """T-PY25: 环形覆盖目标按下一视场收益选点，而不是固定方向或真值坐标."""
+        width = height = 80
+        origin_x = origin_y = -10.0
+        resolution = 0.25
+        variance = np.ones((height, width), dtype=np.float32) * 0.2
+        confidence = np.full((height, width), 0.85, dtype=np.float32)
+        visits = np.full((height, width), 6.0, dtype=np.float32)
+        age = np.zeros((height, width), dtype=np.float32)
+        yy, xx = np.mgrid[0:height, 0:width]
+        wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
+        wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
+
+        # Southeast has not been covered recently; the selected target should
+        # move toward that FOV footprint while staying outside the known-source
+        # exclusion zone.
+        unknown = (wx > 2.0) & (wy < -3.0)
+        confidence[unknown] = 0.05
+        visits[unknown] = 0.0
+        age[unknown] = 80.0
+        target = select_coverage_ring_target(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=resolution,
+            origin_x=origin_x, origin_y=origin_y,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            known_sources=[(-1.5, 0.0)],
+            min_radius=4.0,
+            max_radius=7.0,
+            safe_dist=2.0,
+            footprint_radius=2.5,
+            preferred_yaw=0.0,
+            directional_weight=0.1,
+            num_angles=32,
+            num_rings=3,
+        )
+        self.assertIsNotNone(target)
+        self.assertEqual(target.reason, 'coverage_ring')
+        self.assertGreater(target.x, 1.0)
+        self.assertLess(target.y, -2.0)
+        self.assertGreater(math.hypot(target.x + 1.5, target.y), 2.0)
+
+    def test_T_PY26_coverage_ring_penalizes_recent_direction(self):
+        """T-PY26: 覆盖扫掠会抑制刚走过的方向，避免在同一扇区反复扩张."""
+        width = height = 80
+        origin_x = origin_y = -10.0
+        resolution = 0.25
+        variance = np.ones((height, width), dtype=np.float32)
+        confidence = np.zeros((height, width), dtype=np.float32)
+        visits = np.zeros((height, width), dtype=np.float32)
+        age = np.full((height, width), 60.0, dtype=np.float32)
+        base_kwargs = dict(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=resolution,
+            origin_x=origin_x, origin_y=origin_y,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            min_radius=5.0,
+            max_radius=5.0,
+            safe_dist=2.0,
+            footprint_radius=2.5,
+            preferred_yaw=0.0,
+            directional_weight=0.6,
+            num_angles=24,
+            num_rings=1,
+        )
+        first = select_coverage_ring_target(**base_kwargs)
+        second = select_coverage_ring_target(
+            **base_kwargs,
+            recent_yaws=[0.0],
+            recent_yaw_penalty=1.2,
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        first_yaw = math.atan2(first.y, first.x)
+        second_yaw = math.atan2(second.y, second.x)
+        self.assertLess(abs(math.atan2(math.sin(first_yaw), math.cos(first_yaw))), math.radians(25.0))
+        self.assertGreater(abs(math.atan2(math.sin(second_yaw), math.cos(second_yaw))), math.radians(45.0))
+
+    def test_T_PY27_source_benchmark_match_radius_scales_with_sigma(self):
+        """T-PY27: source-level 评测匹配半径随热源/估计 sigma 缩放."""
+        bench_path = WORKSPACE / 'src/thermal_robot/scripts/source_benchmark.py'
+        spec = importlib.util.spec_from_file_location('source_benchmark', bench_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        self.assertEqual(module.source_match_radius({'sigma': '0.3'}, {'sigma': '0.4'}), 1.5)
+        self.assertEqual(module.source_match_radius({'sigma': '1.0'}, {'sigma': '0.5'}), 2.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
