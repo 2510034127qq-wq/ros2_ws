@@ -189,11 +189,12 @@ def default_config_b_sources() -> List[DynamicHeatSource]:
 
 def default_config_b_scenario(num_sources: int = 3) -> ThermalScenario:
     sources = default_config_b_sources()
-    n_src = max(1, min(int(num_sources), len(sources)))
+    requested = int(num_sources)
+    n_src = len(sources) if requested <= 0 else max(1, min(requested, len(sources)))
     return ThermalScenario(sources=sources[:n_src])
 
 
-def load_scenario_file(path: str, num_sources: int = 3) -> ThermalScenario:
+def load_scenario_file(path: str, num_sources: int = 0) -> ThermalScenario:
     if not path:
         return default_config_b_scenario(num_sources)
     if yaml is None:
@@ -215,7 +216,9 @@ def load_scenario_file(path: str, num_sources: int = 3) -> ThermalScenario:
         scenario.sources.append(_source_from_mapping(idx, item))
     if not scenario.sources:
         scenario.sources = default_config_b_sources()
-    scenario.sources = scenario.sources[: max(1, min(num_sources, len(scenario.sources)))]
+    requested = int(num_sources)
+    if requested > 0:
+        scenario.sources = scenario.sources[: max(1, min(requested, len(scenario.sources)))]
     return scenario
 
 

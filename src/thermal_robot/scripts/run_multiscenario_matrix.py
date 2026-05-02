@@ -44,6 +44,12 @@ EXTENDED_CASES = [
     MatrixCase("islands_static_offset", WORLDS / "thermal_scene_sparse_islands.world", SCENARIOS / "static_offset_sources.yaml"),
 ]
 
+VARIABLE_SOURCE_CASES = [
+    MatrixCase("open_static_2src", WORLDS / "thermal_scene_nav.world", SCENARIOS / "static_two_sources.yaml"),
+    MatrixCase("mixed_dynamic_4src", WORLDS / "thermal_scene_mixed_rooms.world", SCENARIOS / "dynamic_four_sources.yaml"),
+    MatrixCase("zigzag_dynamic_5src", WORLDS / "thermal_scene_zigzag_corridors.world", SCENARIOS / "dynamic_five_sources.yaml"),
+]
+
 FULL_WORLDS = [
     WORLDS / "thermal_scene_nav.world",
     WORLDS / "thermal_scene_obstacle_field.world",
@@ -59,6 +65,9 @@ FULL_SCENARIOS = [
     SCENARIOS / "dynamic_circular_sources.yaml",
     SCENARIOS / "dynamic_appear_disappear_sources.yaml",
     SCENARIOS / "dynamic_waypoint_random_sources.yaml",
+    SCENARIOS / "static_two_sources.yaml",
+    SCENARIOS / "dynamic_four_sources.yaml",
+    SCENARIOS / "dynamic_five_sources.yaml",
 ]
 
 
@@ -219,6 +228,9 @@ def run_case(
         "missing_counts": missing_counts,
         "source_recall": summary.get("source_recall"),
         "source_precision": summary.get("source_precision"),
+        "truth_count": summary.get("truth_count"),
+        "matched_count": summary.get("matched_count"),
+        "confirmed_count": summary.get("confirmed_count"),
         "duplicate_confirmations": summary.get("duplicate_confirmations"),
         "path_length_m": summary.get("path_length_m"),
         "plans_observed": summary.get("nav2_goal_proxy", {}).get("plans_observed"),
@@ -231,6 +243,8 @@ def select_cases(args: argparse.Namespace) -> List[MatrixCase]:
         return args.case
     if args.preset == "full":
         return _full_cases()
+    if args.preset == "variable":
+        return VARIABLE_SOURCE_CASES
     if args.preset == "extended":
         return EXTENDED_CASES
     return REPRESENTATIVE_CASES
@@ -238,7 +252,7 @@ def select_cases(args: argparse.Namespace) -> List[MatrixCase]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=["representative", "extended", "full"], default="representative")
+    parser.add_argument("--preset", choices=["representative", "extended", "variable", "full"], default="representative")
     parser.add_argument("--case", type=_parse_case, action="append", help="name:world_file:scenario_file")
     parser.add_argument("--out-root", default="", help="default: /tmp/thermal_world_scenario_matrix_<timestamp>")
     parser.add_argument("--duration", type=float, default=90.0, help="collector duration per case")

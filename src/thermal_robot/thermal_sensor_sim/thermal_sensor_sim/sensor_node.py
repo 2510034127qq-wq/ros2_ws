@@ -60,7 +60,7 @@ class SensorNode(Node):
 
         self._rng     = np.random.default_rng(seed)
         if scenario_file:
-            self._scenario = load_scenario_file(scenario_file, n_src)
+            self._scenario = load_scenario_file(scenario_file, num_sources=0)
             self._scenario_label = scenario_file
         else:
             self._scenario = default_config_b_scenario(n_src)

@@ -541,6 +541,9 @@ class DataCollector(Node):
         return {
             'source_recall': round(recall, 3),
             'source_precision': round(precision, 3),
+            'truth_count': truth_count,
+            'matched_count': len(matches),
+            'confirmed_count': confirmed_count,
             'time_to_first_source': min(times) if times else None,
             'time_to_all_sources': max(times) if len(matches) == truth_count and times else None,
             'localization_errors_m': matches,

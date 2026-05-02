@@ -535,12 +535,14 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         """T-PY21: 多情景 YAML 覆盖静态、线性、环形、出现/消失、随机/航点运动."""
         scenario_dir = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios'
         scenario_paths = sorted(scenario_dir.glob('*.yaml'))
-        self.assertGreaterEqual(len(scenario_paths), 5)
+        self.assertGreaterEqual(len(scenario_paths), 8)
         moved = 0
         intermittent = 0
+        source_counts = set()
         for path in scenario_paths:
-            scenario = load_scenario_file(str(path), num_sources=3)
-            self.assertEqual(len(scenario.sources), 3, path.name)
+            scenario = load_scenario_file(str(path))
+            source_counts.add(len(scenario.sources))
+            self.assertGreaterEqual(len(scenario.sources), 2, path.name)
             states0 = scenario.all_states(0.0)
             states60 = scenario.all_states(60.0)
             for src0, src60 in zip(states0, states60):
@@ -550,6 +552,9 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
                     intermittent += 1
                 self.assertGreaterEqual(src60.amplitude, 0.0)
                 self.assertGreater(src60.sigma_m, 0.0)
+        limited = load_scenario_file(str(scenario_dir / 'dynamic_five_sources.yaml'), num_sources=3)
+        self.assertEqual(len(limited.sources), 3)
+        self.assertTrue({2, 3, 4, 5}.issubset(source_counts))
         self.assertGreaterEqual(moved, 4)
         self.assertGreaterEqual(intermittent, 1)
 
@@ -603,11 +608,16 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertGreaterEqual(len(extended_worlds), 6)
         self.assertGreaterEqual(len(extended_scenarios), 6)
 
+        variable_cases = module.VARIABLE_SOURCE_CASES
+        variable_counts = {len(load_scenario_file(str(case.scenario)).sources) for case in variable_cases}
+        self.assertTrue({2, 4, 5}.issubset(variable_counts))
+        self.assertGreaterEqual(len({case.world.name for case in variable_cases}), 3)
+
         full_cases = module._full_cases()
         full_worlds = {case.world.name for case in full_cases}
         full_scenarios = {case.scenario.name for case in full_cases}
         self.assertGreaterEqual(len(full_worlds), 6)
-        self.assertGreaterEqual(len(full_scenarios), 6)
+        self.assertGreaterEqual(len(full_scenarios), 9)
         self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
 
     def test_T_PY24_nav2_progress_watchdog_is_configured(self):
@@ -630,6 +640,7 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('post_confirm_immediate_departure', params_text)
         self.assertIn('thermal_pose_source: "odom"', params_text)
         self.assertIn('pose_source:        "odom"', params_text)
+        self.assertIn('num_sources:       -1', params_text)
         self.assertIn('_start_post_confirm_departure', controller_text)
         self.assertIn('goal_map_x = self._map_x + c * dx - s * dy', controller_text)
         self.assertIn('_departure_progress_best_d', controller_text)

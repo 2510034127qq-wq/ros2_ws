@@ -1,0 +1,17 @@
+name: static_two_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: T1_north
+    xy: [-2.0, 3.0]
+    amplitude: 30.0
+    sigma_m: 1.0
+    motion: static
+  - id: T2_east
+    xy: [5.0, -2.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: static

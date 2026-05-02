@@ -95,6 +95,11 @@ ros2 launch thermal_bringup sim_nav_slam_launch.py \
 
 The scenario schema supports static, linear, circular, waypoint-loop,
 appear/disappear, and random-walk source motion plus optional strength drift.
+When `scenario_file` is set, the sensor loads every source listed in the YAML;
+`sensor_node.num_sources` only limits the empty-`scenario_file` Config-B
+fallback. The controller is open-ended by default (`num_sources: -1`) and uses a
+long no-new-source timeout, so non-3-source worlds are not cut short by a fixed
+source count.
 The online controller does not subscribe to `/sim/thermal_sources_truth`; that
 topic is for collector and benchmark evaluation only.
 
@@ -128,6 +133,9 @@ dynamic_linear_sources.yaml
 dynamic_circular_sources.yaml
 dynamic_appear_disappear_sources.yaml
 dynamic_waypoint_random_sources.yaml
+static_two_sources.yaml
+dynamic_four_sources.yaml
+dynamic_five_sources.yaml
 ```
 
 Manual world/scenario selection example:
@@ -162,6 +170,17 @@ python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
   --min-recall 0.333
 ```
 
+Variable-source-count matrix covering 2-, 4-, and 5-source scenarios:
+
+```bash
+python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
+  --preset variable \
+  --out-root /tmp/thermal_world_scenario_matrix_variable \
+  --duration 120 \
+  --warmup 36 \
+  --min-recall 0.4
+```
+
 Full matrix across all configured worlds and scenarios:
 
 ```bash
@@ -192,11 +211,21 @@ zigzag_circular        recall=1.000 precision=1.000 duplicate=0
 islands_static_offset  recall=0.667 precision=1.000 duplicate=0
 ```
 
-This run used `--preset extended --duration 90 --warmup 36 --min-recall 0.667`.
-It is a stronger regression gate than the earlier 4-case representative matrix,
-but still not a proof of full generalization. Use the full matrix, longer
-runtime, random seeds, multi-spawn tests, and different source counts before
-treating the algorithm as broadly validated.
+Variable-source-count evidence from 2026-05-02:
+
+```text
+/tmp/thermal_world_scenario_matrix_variable120_openended
+open_static_2src      truth=2 matched=1 recall=0.500 precision=1.000 duplicate=0
+mixed_dynamic_4src    truth=4 matched=2 recall=0.500 precision=1.000 duplicate=0
+zigzag_dynamic_5src   truth=5 matched=2 recall=0.400 precision=1.000 duplicate=0
+```
+
+The extended run above used `--preset extended --duration 90 --warmup 36
+--min-recall 0.667`. The variable-source run used `--preset variable
+--duration 120 --warmup 36 --min-recall 0.4`. These are regression gates, not a
+proof of full generalization. Use the full matrix, longer runtime, random
+seeds, multi-spawn tests, and different source counts before treating the
+algorithm as broadly validated.
 
 ## Build
 

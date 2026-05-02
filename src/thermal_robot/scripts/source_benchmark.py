@@ -89,6 +89,9 @@ def compute(run_dir: Path) -> dict:
     return {
         'source_recall': round(len(matches) / max(1, truth_count), 3),
         'source_precision': round(len(matches) / max(1, confirmed_count), 3),
+        'truth_count': truth_count,
+        'matched_count': len(matches),
+        'confirmed_count': confirmed_count,
         'time_to_first_source': min(times) if times else None,
         'time_to_all_sources': max(times) if len(matches) == truth_count and times else None,
         'localization_errors_m': matches,

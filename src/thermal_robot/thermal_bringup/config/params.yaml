@@ -110,7 +110,7 @@ controller_node:
     relocate_dist:      2.0
     relocate_lin_vel:   0.2
     peak_hold_s:        1.5
-    num_sources:        3
+    num_sources:       -1
     spawn_x:           -6.0
     spawn_y:            0.0
     stuck_timeout:              60.0  # v30: Nav2 handles stuck recovery
@@ -120,7 +120,7 @@ controller_node:
     centroid_arrival_r:          3.0
     max_search_radius:          12.0
     negative_trise_bail:         0.3
-    no_new_source_timeout:      60.0   # v26: 120→60s
+    no_new_source_timeout:     180.0
 
     # ── Frontier + Lévy ────────────────────────────────────────────────────
     frontier_update_interval:    8.0

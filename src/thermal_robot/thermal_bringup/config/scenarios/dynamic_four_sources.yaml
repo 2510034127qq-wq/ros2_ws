@@ -1,0 +1,35 @@
+name: dynamic_four_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: Q1_waypoint
+    xy: [-3.0, 2.0]
+    amplitude: 29.0
+    sigma_m: 1.0
+    motion: waypoint_loop
+    motion_params:
+      speed_m_s: 0.08
+      waypoints:
+        - [-3.5, 2.0]
+        - [-1.5, 3.5]
+        - [-2.0, 1.5]
+  - id: Q2_linear
+    xy: [3.0, -2.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: linear
+    motion_params: {vx: -0.02, vy: 0.01}
+  - id: Q3_static_weak
+    xy: [-6.0, -5.0]
+    amplitude: 18.0
+    sigma_m: 0.8
+    motion: static
+  - id: Q4_intermittent
+    xy: [3.0, 4.0]
+    amplitude: 22.0
+    sigma_m: 0.9
+    motion: appear_disappear
+    motion_params: {period_s: 55.0, duty_cycle: 0.6, phase_s: 8.0}
