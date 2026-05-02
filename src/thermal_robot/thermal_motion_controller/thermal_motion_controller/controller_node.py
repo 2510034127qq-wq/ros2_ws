@@ -236,7 +236,7 @@ class ControllerNode(Node):
 
         # ── Parameter declarations (identical to v30) ─────────────────────
         self.declare_parameter('publish_rate',               10.0)
-        self.declare_parameter('max_linear_vel',             0.25)
+        self.declare_parameter('max_linear_vel',             0.28)
         self.declare_parameter('max_angular_vel',            0.5)
         self.declare_parameter('kp_angular',                 1.2)
         self.declare_parameter('ang_smooth_alpha',           0.55)
@@ -273,7 +273,7 @@ class ControllerNode(Node):
         self.declare_parameter('negative_trise_bail',        0.3)
         self.declare_parameter('frontier_update_interval',   8.0)
         self.declare_parameter('frontier_arrival_r',         2.5)
-        self.declare_parameter('frontier_nav_lin_vel',       0.22)
+        self.declare_parameter('frontier_nav_lin_vel',       0.25)
         self.declare_parameter('levy_rounds_trigger',        2)
         self.declare_parameter('levy_region_novelty_thr',    0.15)
         self.declare_parameter('levy_mu',                    1.5)
@@ -318,7 +318,7 @@ class ControllerNode(Node):
         self.declare_parameter('fine_mode_entry_thresh',      2.0)
         self.declare_parameter('frontier_cold_timeout_s',    32.0)
         self.declare_parameter('departure_timeout_s',       120.0)
-        self.declare_parameter('departure_speed',             0.22)
+        self.declare_parameter('departure_speed',             0.25)
         self.declare_parameter('departure_progress_timeout_s', 8.0)
         self.declare_parameter('departure_progress_min_delta', 0.25)
         self.declare_parameter('planner_information_gain_weight', 1.0)
@@ -350,6 +350,9 @@ class ControllerNode(Node):
         self.declare_parameter('source_set_expansion_directional_weight', 0.35)
         self.declare_parameter('source_set_outward_directional_weight', 0.85)
         self.declare_parameter('source_set_outward_bonus', 0.35)
+        self.declare_parameter('source_set_lateral_directional_weight', 0.95)
+        self.declare_parameter('source_set_lateral_bonus', 0.45)
+        self.declare_parameter('source_set_lateral_max_d', 10.0)
         self.declare_parameter('source_set_direct_first_s', 32.0)
         self.declare_parameter('post_confirm_direct_first_s', 24.0)
         self.declare_parameter('post_confirm_immediate_departure', True)
@@ -476,6 +479,9 @@ class ControllerNode(Node):
         self._source_set_expansion_directional_weight = float(g('source_set_expansion_directional_weight').value)
         self._source_set_outward_directional_weight = float(g('source_set_outward_directional_weight').value)
         self._source_set_outward_bonus = float(g('source_set_outward_bonus').value)
+        self._source_set_lateral_directional_weight = float(g('source_set_lateral_directional_weight').value)
+        self._source_set_lateral_bonus = float(g('source_set_lateral_bonus').value)
+        self._source_set_lateral_max_d = float(g('source_set_lateral_max_d').value)
         self._source_set_direct_first_s = float(g('source_set_direct_first_s').value)
         self._post_confirm_direct_first_s = float(g('post_confirm_direct_first_s').value)
         self._post_confirm_immediate_departure = bool(g('post_confirm_immediate_departure').value)
@@ -1219,20 +1225,48 @@ class ControllerNode(Node):
         gaps.sort(key=lambda item: item[0], reverse=True)
         return [mid for _, mid in gaps]
 
+    def _source_pair_lateral_yaws(self) -> List[float]:
+        if len(self._found_sources) < 2:
+            return []
+        best_pair = None
+        best_d = -1.0
+        for i, (ax, ay, _) in enumerate(self._found_sources):
+            for bx, by, _ in self._found_sources[i + 1:]:
+                d = math.hypot(bx - ax, by - ay)
+                if d > best_d:
+                    best_d = d
+                    best_pair = (ax, ay, bx, by)
+        if best_pair is None or best_d < 1e-3:
+            return []
+        ax, ay, bx, by = best_pair
+        axis_yaw = math.atan2(by - ay, bx - ax)
+        return [
+            _wrap_angle_local(axis_yaw + math.pi * 0.5),
+            _wrap_angle_local(axis_yaw - math.pi * 0.5),
+        ]
+
     def _source_set_expansion_target(self, min_travel_d: float):
         if len(self._found_sources) < self._source_set_expansion_min_sources:
             return None
         if not self._map_available():
             return None
         cx, cy = self._sources_centroid()
-        yaw_candidates: List[Tuple[float, float, float, str]] = []
+        yaw_candidates: List[Tuple[float, float, float, str, float]] = []
         outward_yaw = math.atan2(cy - self._spawn_y, cx - self._spawn_x)
         if math.hypot(cx - self._spawn_x, cy - self._spawn_y) > 1.0:
             yaw_candidates.append((
                 outward_yaw,
                 self._source_set_outward_directional_weight,
                 self._source_set_outward_bonus,
-                'outward'))
+                'outward',
+                self._source_set_expansion_max_d))
+        for yaw in self._source_pair_lateral_yaws():
+            yaw_candidates.append((
+                yaw,
+                self._source_set_lateral_directional_weight,
+                self._source_set_lateral_bonus,
+                'source_lateral',
+                self._source_set_lateral_max_d))
         sector = self._map_sector_yaw(
             min_d=min_travel_d,
             max_d=self._source_set_expansion_max_d,
@@ -1244,25 +1278,28 @@ class ControllerNode(Node):
                 sector.yaw,
                 self._source_set_expansion_directional_weight,
                 0.0,
-                'map_sector'))
+                'map_sector',
+                self._source_set_expansion_max_d))
         for yaw in self._source_set_gap_yaws(cx, cy):
             yaw_candidates.append((
                 yaw,
                 self._source_set_expansion_directional_weight,
                 0.0,
-                'source_gap'))
+                'source_gap',
+                self._source_set_lateral_max_d))
         yaw_candidates.append((
             self._phase_yaw_for_coverage(),
             self._source_set_expansion_directional_weight,
             0.0,
-            'coverage_phase'))
+            'coverage_phase',
+            self._source_set_expansion_max_d))
 
         best = None
         best_yaw = None
         best_label = 'source_set'
         best_eval_score = -float('inf')
         seen = set()
-        for yaw, dir_weight, bonus, label in yaw_candidates:
+        for yaw, dir_weight, bonus, label, max_travel in yaw_candidates:
             key = round(_wrap_angle_local(yaw), 2)
             if key in seen:
                 continue
@@ -1275,7 +1312,7 @@ class ControllerNode(Node):
                 directional_weight=dir_weight,
                 anchor=(cx, cy),
                 min_travel_d=min_travel_d,
-                max_travel_d=self._source_set_expansion_max_d,
+                max_travel_d=max(min_travel_d, max_travel),
             )
             if target is None:
                 continue
@@ -1293,8 +1330,11 @@ class ControllerNode(Node):
         if not self._map_available():
             return None
         max_d = max(self._pc_min_d + 2.0, self._departure_dist, self._coverage_ring_max_d)
-        yaw_candidates: List[float] = []
-        for phase in (self._phase_yaw_for_coverage(), self._phase_yaw_away_from_sources()):
+        yaw_candidates: List[Tuple[float, float, float, str]] = []
+        for phase, label in (
+            (self._phase_yaw_for_coverage(), 'coverage_phase'),
+            (self._phase_yaw_away_from_sources(), 'source_away'),
+        ):
             sector = self._map_sector_yaw(
                 min_d=min_travel_d,
                 max_d=max_d,
@@ -1302,13 +1342,14 @@ class ControllerNode(Node):
                 phase_yaw=phase,
             )
             if sector is not None:
-                yaw_candidates.append(sector.yaw)
-            yaw_candidates.append(phase)
-
+                yaw_candidates.append((sector.yaw, self._departure_directional_weight, 0.0, f'{label}_sector'))
+            yaw_candidates.append((phase, self._departure_directional_weight, 0.0, label))
         best = None
         best_yaw = None
+        best_label = 'departure'
+        best_eval_score = -float('inf')
         seen = set()
-        for yaw in yaw_candidates:
+        for yaw, dir_weight, bonus, label in yaw_candidates:
             key = round(_wrap_angle_local(yaw), 2)
             if key in seen:
                 continue
@@ -1318,19 +1359,22 @@ class ControllerNode(Node):
                 max_radius=max_d,
                 safe_dist=max(self._survey_safe_dist, self._safe_dist()),
                 preferred_yaw=yaw,
-                directional_weight=self._departure_directional_weight,
+                directional_weight=dir_weight,
                 anchor=(cx, cy),
                 min_travel_d=min_travel_d,
                 max_travel_d=max_d,
             )
             if target is None:
                 continue
-            if best is None or target[2] > best[2]:
+            eval_score = target[2] + bonus
+            if best is None or eval_score > best_eval_score:
                 best = target
                 best_yaw = yaw
+                best_label = label
+                best_eval_score = eval_score
         if best is None:
             return None
-        return best, best_yaw
+        return best, best_yaw, best_label
 
     def _map_region_novelty(self, radius=5.0):
         if not self._map_available():
@@ -1653,13 +1697,13 @@ class ControllerNode(Node):
             return (tx, ty)
         best_ring = self._best_departure_ring(cx, cy, departure_min_d)
         if best_ring is not None:
-            ring, yaw = best_ring
+            ring, yaw, departure_label = best_ring
             tx, ty = ring[0], ring[1]
             self._remember_coverage_yaw(tx, ty)
             reason = ring[3] if len(ring) > 3 else 'annular_coverage'
             self.get_logger().info(
                 f'[DEPARTURE_WP/ring_multi/{reason}] centroid=({cx:.1f},{cy:.1f}) '
-                f'yaw={math.degrees(yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
+                f'{departure_label}={math.degrees(yaw):.0f}deg →({tx:.1f},{ty:.1f}) '
                 f'd_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
             return (tx, ty)
         sector = self._map_sector_yaw(
