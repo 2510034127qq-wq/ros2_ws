@@ -7,10 +7,10 @@ Core principle: robot navigates purely from sensor signals, never knows
 source coordinates a priori.
 
 v31 fixes vs v30 (targeted, algorithm logic unchanged):
-  FIX-1: SLAM coordinate offset.
-    SLAM map frame origin = robot spawn position in world.
-    TF gives map coords → add spawn offset → world coords.
-    world_x = slam_x + spawn_x  (slam_x≈0 at spawn → world_x = spawn_x ✓)
+  FIX-1: Thermal navigation pose frame.
+    The thermal simulator renders images from Gazebo/odom pose, so the world
+    thermal map and controller use odom-aligned world coordinates by default.
+    SLAM TF is still tracked for Nav2 map-goal conversion.
 
   FIX-2: COARSE_SURVEY direct navigation fallback.
     When Nav2 unavailable/failed, robot must still move toward waypoint.
@@ -19,14 +19,15 @@ v31 fixes vs v30 (targeted, algorithm logic unchanged):
 
   FIX-3: Nav2 goal frame correction.
     Nav2 expects goals in 'map' frame.
-    world → map: map_x = world_x - spawn_x  (inverse of FIX-1).
-    Previously goals were sent in world frame → Nav2 rejected all plans.
+    Odom-world targets are converted through the live map pose when TF exists;
+    the static spawn offset remains the fallback.
 
   FIX-4: FRONTIER_NAV direct fallback robustness.
     Guaranteed cmd_vel output every tick regardless of Nav2 state.
 
 Generalizability design:
-  - Works without SLAM (falls back to odom-based position)
+  - Keeps thermal projection and controller in the same physical pose frame
+  - Works without SLAM (uses odom-based position)
   - Works without Nav2 (falls back to direct /cmd_vel everywhere)
   - Gradient ascent, Lévy flight, belief map logic unchanged
   - All state transitions driven by thermal sensor signals only
@@ -261,6 +262,7 @@ class ControllerNode(Node):
         self.declare_parameter('no_new_source_timeout',     60.0)
         self.declare_parameter('spawn_x',                   -6.0)
         self.declare_parameter('spawn_y',                    0.0)
+        self.declare_parameter('thermal_pose_source',       'odom')
         self.declare_parameter('stuck_timeout',             90.0)
         self.declare_parameter('stuck_dist_thresh',          0.5)
         self.declare_parameter('min_ascent_temp_rise',       0.5)
@@ -317,6 +319,8 @@ class ControllerNode(Node):
         self.declare_parameter('frontier_cold_timeout_s',    32.0)
         self.declare_parameter('departure_timeout_s',       120.0)
         self.declare_parameter('departure_speed',             0.22)
+        self.declare_parameter('departure_progress_timeout_s', 8.0)
+        self.declare_parameter('departure_progress_min_delta', 0.25)
         self.declare_parameter('planner_information_gain_weight', 1.0)
         self.declare_parameter('planner_source_probability_weight', 1.4)
         self.declare_parameter('planner_coverage_gain_weight', 0.7)
@@ -347,6 +351,8 @@ class ControllerNode(Node):
         self.declare_parameter('source_set_outward_directional_weight', 0.85)
         self.declare_parameter('source_set_outward_bonus', 0.35)
         self.declare_parameter('source_set_direct_first_s', 32.0)
+        self.declare_parameter('post_confirm_direct_first_s', 24.0)
+        self.declare_parameter('post_confirm_immediate_departure', True)
         self.declare_parameter('nav2_progress_timeout_s', 4.0)
         self.declare_parameter('nav2_progress_min_delta', 0.35)
         self.declare_parameter('nav2_stall_direct_s', 16.0)
@@ -380,6 +386,7 @@ class ControllerNode(Node):
         self._no_new_t     = float(g('no_new_source_timeout').value)
         self._spawn_x      = float(g('spawn_x').value)
         self._spawn_y      = float(g('spawn_y').value)
+        self._pose_source  = str(g('thermal_pose_source').value).lower()
         self._stuck_to     = float(g('stuck_timeout').value)
         self._stuck_thr    = float(g('stuck_dist_thresh').value)
         self._min_asc_rise = float(g('min_ascent_temp_rise').value)
@@ -436,6 +443,8 @@ class ControllerNode(Node):
         self._frontier_cold_to    = float(g('frontier_cold_timeout_s').value)
         self._departure_timeout   = float(g('departure_timeout_s').value)
         self._departure_speed     = float(g('departure_speed').value)
+        self._departure_progress_timeout_s = float(g('departure_progress_timeout_s').value)
+        self._departure_progress_min_delta = float(g('departure_progress_min_delta').value)
         self._planner_weights = PlannerWeights(
             information_gain=float(g('planner_information_gain_weight').value),
             source_probability=float(g('planner_source_probability_weight').value),
@@ -468,6 +477,8 @@ class ControllerNode(Node):
         self._source_set_outward_directional_weight = float(g('source_set_outward_directional_weight').value)
         self._source_set_outward_bonus = float(g('source_set_outward_bonus').value)
         self._source_set_direct_first_s = float(g('source_set_direct_first_s').value)
+        self._post_confirm_direct_first_s = float(g('post_confirm_direct_first_s').value)
+        self._post_confirm_immediate_departure = bool(g('post_confirm_immediate_departure').value)
         self._nav2_progress_timeout_s = float(g('nav2_progress_timeout_s').value)
         self._nav2_progress_min_delta = float(g('nav2_progress_min_delta').value)
         self._nav2_stall_direct_s = float(g('nav2_stall_direct_s').value)
@@ -492,6 +503,9 @@ class ControllerNode(Node):
         self._odom_x   = 0.0
         self._odom_y   = 0.0
         self._odom_yaw = 0.0
+        self._map_x    = 0.0
+        self._map_y    = 0.0
+        self._map_yaw  = 0.0
         self._wx       = self._spawn_x   # world X (updated from TF or odom)
         self._wy       = self._spawn_y   # world Y
         self._tf_ready = False
@@ -546,6 +560,9 @@ class ControllerNode(Node):
 
         # ── DEPARTURE ────────────────────────────────────────────────────
         self._departure_wp: Optional[Tuple[float,float]] = None
+        self._departure_progress_goal = None
+        self._departure_progress_best_d = float('inf')
+        self._departure_progress_t = 0.0
 
         # ── COARSE_SURVEY ─────────────────────────────────────────────────
         self._coarse_wp: Optional[Tuple[float,float]] = None
@@ -612,22 +629,20 @@ class ControllerNode(Node):
         self.get_logger().info(
             f'controller_node v31 | FIX: SLAM coord offset + COARSE fallback + Nav2 frame | '
             f'COARSE→Nav2+fallback | FINE→direct /cmd_vel | '
+            f'pose_source={self._pose_source} | '
             f'spawn=({self._spawn_x},{self._spawn_y}) | num_sources={self._num_src}')
 
     # ────────────────────────────────────────────────────────────────────────
-    # [FIX-1] TF position update: SLAM map coords → world coords
+    # Pose update: thermal world can use odom; Nav2 still gets map goals.
     # ────────────────────────────────────────────────────────────────────────
 
     def _update_world_pos_from_tf(self) -> bool:
         """
-        Get world position from SLAM TF (map→base_link).
+        Update robot pose in the thermal world frame.
 
-        FIX-1: SLAM map frame origin = robot spawn position in world.
-        Conversion: world = slam_map + spawn_offset
-          - At robot spawn: SLAM says (0,0) → world is (spawn_x, spawn_y) ✓
-          - Robot moves +1m in X: SLAM says (1,0) → world is (spawn_x+1, spawn_y) ✓
-
-        Fallback to odom integration when SLAM TF unavailable (startup / SLAM failure).
+        The simulated thermal image is generated from the Gazebo/odom pose, so
+        the mapper and controller default to odom-aligned world coordinates.
+        TF is still tracked for Nav2 map-goal conversion.
         """
         try:
             t = self._tf_buffer.lookup_transform(
@@ -635,26 +650,32 @@ class ControllerNode(Node):
                 rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=0.05))
 
-            # FIX-1: Add spawn offset to convert SLAM map frame → world frame
-            self._wx = t.transform.translation.x + self._spawn_x
-            self._wy = t.transform.translation.y + self._spawn_y
+            self._map_x = t.transform.translation.x
+            self._map_y = t.transform.translation.y
 
             q = t.transform.rotation
             siny = 2.0*(q.w*q.z + q.x*q.y)
             cosy = 1.0 - 2.0*(q.y*q.y + q.z*q.z)
-            self._odom_yaw = math.atan2(siny, cosy)
+            self._map_yaw = math.atan2(siny, cosy)
+            if self._pose_source == 'tf':
+                self._wx = self._map_x + self._spawn_x
+                self._wy = self._map_y + self._spawn_y
+                self._odom_yaw = self._map_yaw
+            else:
+                self._wx = self._spawn_x + self._odom_x
+                self._wy = self._spawn_y + self._odom_y
 
             if not self._tf_ready:
                 self._tf_ready = True
                 self.get_logger().info(
                     f'[TF_READY] SLAM TF (map→base_link) available '
+                    f'pose_source={self._pose_source} '
                     f'world_pos=({self._wx:.2f},{self._wy:.2f}) '
-                    f'[slam=({t.transform.translation.x:.2f},{t.transform.translation.y:.2f}) '
-                    f'+ spawn=({self._spawn_x},{self._spawn_y})]')
+                    f'[map=({self._map_x:.2f},{self._map_y:.2f}) '
+                    f'odom=({self._odom_x:.2f},{self._odom_y:.2f})]')
             return True
 
         except (LookupException, ExtrapolationException, ConnectivityException):
-            # SLAM not ready: fallback to odom
             self._wx = self._spawn_x + self._odom_x
             self._wy = self._spawn_y + self._odom_y
             return False
@@ -686,9 +707,9 @@ class ControllerNode(Node):
         """
         Send NavigateToPose goal.
 
-        FIX-3: Nav2 expects goals in 'map' frame.
-        tx, ty are in world frame. Convert: map = world - spawn.
-        world = slam + spawn → slam(map) = world - spawn.
+        Nav2 expects goals in 'map' frame.  When thermal navigation uses the
+        odom-aligned world frame, convert the local target displacement through
+        the live map pose instead of assuming a fixed spawn offset.
 
         Rate limit: max one goal attempt per 3s to avoid rejection spam.
         Returns True only when Nav2 is actively navigating to this goal.
@@ -715,10 +736,17 @@ class ControllerNode(Node):
             if (now - self._nav2_last_send_t) < 3.0:
                 return False
 
-        # FIX-3: Convert world coords → map frame for Nav2
-        # map_x = world_x - spawn_x  (inverse of FIX-1)
-        goal_map_x = tx - self._spawn_x
-        goal_map_y = ty - self._spawn_y
+        if self._pose_source == 'odom' and self._tf_ready:
+            dx = tx - self._wx
+            dy = ty - self._wy
+            yaw_delta = self._map_yaw - self._odom_yaw
+            c = math.cos(yaw_delta)
+            s = math.sin(yaw_delta)
+            goal_map_x = self._map_x + c * dx - s * dy
+            goal_map_y = self._map_y + s * dx + c * dy
+        else:
+            goal_map_x = tx - self._spawn_x
+            goal_map_y = ty - self._spawn_y
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
@@ -1719,6 +1747,29 @@ class ControllerNode(Node):
         self.get_logger().info(f'[CONVERGE→SAMPLE/{reason}]')
         self._pub.publish(Twist())
 
+    def _start_post_confirm_departure(self, now: float, n_found: int):
+        self._move_start = None
+        self._locked_yaw = None
+        self._peak_cand_t = None
+        self._temp_max_seen = self._ambient_est
+        self._temp_win.clear()
+        self._search_rounds = 0
+        self._esc_loop_count = 0
+        self._departure_wp = self._compute_departure_wp()
+        self._departure_progress_goal = None
+        self._departure_progress_best_d = float('inf')
+        self._departure_progress_t = now
+        if n_found >= self._source_set_expansion_min_sources:
+            self._enter_coarse_survey(
+                initial_wp=self._departure_wp,
+                reason='source_set_expansion')
+            return
+        self._state = STATE_DEPARTURE
+        self._state_t = now
+        self.get_logger().info(
+            f'[AT_PEAK→DEPARTURE] {n_found}/{self._num_src or "inf"} '
+            f'→({self._departure_wp[0]:.1f},{self._departure_wp[1]:.1f})')
+
     def _exec_departure(self, now: float):
         """
         DEPARTURE: direct navigation toward exit waypoint.
@@ -1730,10 +1781,23 @@ class ControllerNode(Node):
         tx, ty = self._departure_wp
         dist   = math.hypot(tx-self._wx, ty-self._wy)
         elapsed = now - self._state_t
+        goal_key = (round(tx, 1), round(ty, 1))
+        if self._departure_progress_goal != goal_key:
+            self._departure_progress_goal = goal_key
+            self._departure_progress_best_d = dist
+            self._departure_progress_t = now
+        elif dist <= self._departure_progress_best_d - self._departure_progress_min_delta:
+            self._departure_progress_best_d = dist
+            self._departure_progress_t = now
 
         if dist <= self._frontier_r:
             self.get_logger().info(f'[DEPARTURE→COARSE] arrived d={dist:.2f}m')
             self._enter_coarse_survey(reason='departure_arrived'); return
+        if (now - self._departure_progress_t) >= self._departure_progress_timeout_s:
+            self.get_logger().warn(
+                f'[DEPARTURE→COARSE] stalled {now-self._departure_progress_t:.1f}s '
+                f'd={dist:.1f}m best={self._departure_progress_best_d:.1f}m')
+            self._enter_coarse_survey(reason='departure_stalled'); return
         if elapsed >= self._departure_timeout:
             self.get_logger().warn(f'[DEPARTURE→COARSE] timeout {elapsed:.0f}s')
             self._enter_coarse_survey(reason='departure_timeout'); return
@@ -1808,11 +1872,16 @@ class ControllerNode(Node):
             f'[→COARSE_SURVEY] reason={reason} '
             f'wp=({self._coarse_wp[0]:.1f},{self._coarse_wp[1]:.1f}) '
             f'd={math.hypot(self._coarse_wp[0]-self._wx,self._coarse_wp[1]-self._wy):.1f}m')
-        if reason == 'source_set_expansion' and self._source_set_direct_first_s > 0.0:
-            self._nav2_direct_until = now + self._source_set_direct_first_s
-            self._last_survey_pause_t = now + self._source_set_direct_first_s
+        direct_first_s = 0.0
+        if reason == 'source_set_expansion':
+            direct_first_s = self._source_set_direct_first_s
+        elif reason.startswith('departure_') and self._found_sources:
+            direct_first_s = self._post_confirm_direct_first_s
+        if direct_first_s > 0.0:
+            self._nav2_direct_until = now + direct_first_s
+            self._last_survey_pause_t = now + direct_first_s
             self.get_logger().info(
-                f'[SOURCE_SET_DIRECT_FIRST] {self._source_set_direct_first_s:.0f}s before Nav2 retry and survey pause')
+                f'[COARSE_DIRECT_FIRST] reason={reason} {direct_first_s:.0f}s before Nav2 retry and survey pause')
         # Attempt Nav2 goal; direct fallback guarantees movement if Nav2 fails
         self._send_nav2_goal(self._coarse_wp[0], self._coarse_wp[1])
 
@@ -2177,6 +2246,9 @@ class ControllerNode(Node):
                         f'[ALL DONE] {n_found} sources '
                         f'path={self._path_length:.2f}m t={elapsed:.1f}s')
                 else:
+                    if self._post_confirm_immediate_departure and self._found_sources:
+                        self._start_post_confirm_departure(now, n_found)
+                        return
                     self._state = STATE_RELOCATE; self._state_t = now
                     self._move_start = (self._wx, self._wy)
                     self._locked_yaw = self._escape_yaw()

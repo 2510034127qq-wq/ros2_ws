@@ -50,6 +50,7 @@ thermal_mapper_node:
   ros__parameters:
     publish_rate:       5.0
     frame_id:           "world"
+    pose_source:        "odom"
     spawn_x:           -6.0
     spawn_y:            0.0
     map_size_x_m:      50.0
@@ -88,6 +89,7 @@ source_tracker_node:
 controller_node:
   ros__parameters:
     publish_rate:       10.0
+    thermal_pose_source: "odom"
     max_linear_vel:     0.25
     max_angular_vel:    0.5
     kp_angular:         1.2
@@ -176,12 +178,16 @@ controller_node:
     coverage_ring_rings:              3
     coverage_recent_yaw_penalty:      0.45
     coverage_recent_yaw_window:       5
+    departure_progress_timeout_s:     8.0
+    departure_progress_min_delta:     0.25
     source_set_expansion_min_sources: 2
     source_set_expansion_max_d:       13.0
     source_set_expansion_directional_weight: 0.35
     source_set_outward_directional_weight: 0.85
     source_set_outward_bonus:         0.35
     source_set_direct_first_s:        32.0
+    post_confirm_direct_first_s:      24.0
+    post_confirm_immediate_departure: true
     nav2_progress_timeout_s:          4.0
     nav2_progress_min_delta:          0.35
     nav2_stall_direct_s:             16.0

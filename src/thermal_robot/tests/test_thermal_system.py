@@ -623,6 +623,13 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('source_set_expansion_max_d', params_text)
         self.assertIn('source_set_outward_bonus', params_text)
         self.assertIn('source_set_direct_first_s', params_text)
+        self.assertIn('departure_progress_timeout_s', params_text)
+        self.assertIn('post_confirm_immediate_departure', params_text)
+        self.assertIn('thermal_pose_source: "odom"', params_text)
+        self.assertIn('pose_source:        "odom"', params_text)
+        self.assertIn('_start_post_confirm_departure', controller_text)
+        self.assertIn('goal_map_x = self._map_x + c * dx - s * dy', controller_text)
+        self.assertIn('_departure_progress_best_d', controller_text)
 
     def test_T_PY25_coverage_ring_prefers_fov_unknown_region(self):
         """T-PY25: 环形覆盖目标按下一视场收益选点，而不是固定方向或真值坐标."""

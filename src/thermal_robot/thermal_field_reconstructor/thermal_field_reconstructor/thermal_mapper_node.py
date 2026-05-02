@@ -21,6 +21,7 @@ class ThermalMapperNode(Node):
         super().__init__('thermal_mapper_node')
         self.declare_parameter('publish_rate', 5.0)
         self.declare_parameter('frame_id', 'world')
+        self.declare_parameter('pose_source', 'odom')
         self.declare_parameter('spawn_x', -6.0)
         self.declare_parameter('spawn_y', 0.0)
         self.declare_parameter('map_size_x_m', 50.0)
@@ -36,6 +37,7 @@ class ThermalMapperNode(Node):
         g = self.get_parameter
         self._publish_rate = float(g('publish_rate').value)
         self._frame_id = str(g('frame_id').value)
+        self._pose_source = str(g('pose_source').value).lower()
         self._spawn_x = float(g('spawn_x').value)
         self._spawn_y = float(g('spawn_y').value)
         self._fov_x = float(g('sensor_fov_x').value)
@@ -82,6 +84,7 @@ class ThermalMapperNode(Node):
         self.get_logger().info(
             f'thermal_mapper_node | grid={self._grid.width}x{self._grid.height} '
             f'res={self._grid.resolution:.2f}m frame={self._frame_id} '
+            f'pose_source={self._pose_source} '
             f'spawn=({self._spawn_x:.1f},{self._spawn_y:.1f})')
 
     def _odom_cb(self, msg: Odometry):
@@ -96,6 +99,10 @@ class ThermalMapperNode(Node):
             self._wy = self._spawn_y + self._odom_y
 
     def _update_pose(self):
+        if self._pose_source == 'odom':
+            self._wx = self._spawn_x + self._odom_x
+            self._wy = self._spawn_y + self._odom_y
+            return
         try:
             tf = self._tf_buffer.lookup_transform(
                 'map',
