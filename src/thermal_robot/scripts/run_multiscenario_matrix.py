@@ -151,10 +151,25 @@ def run_case(
     run_dir.mkdir(parents=True, exist_ok=True)
     log_dir = run_dir / "ros_logs"
     log_dir.mkdir(exist_ok=True)
+    case_home = run_dir / "home"
+    gazebo_log_dir = run_dir / "gazebo_logs"
+    case_home.mkdir(exist_ok=True)
+    gazebo_log_dir.mkdir(exist_ok=True)
 
     env = os.environ.copy()
     env["ROS_LOG_DIR"] = str(log_dir)
     env["ROS_DOMAIN_ID"] = str(domain_id)
+    gazebo_port = 11345 + int(domain_id)
+    env["GAZEBO_MASTER_URI"] = f"http://127.0.0.1:{gazebo_port}"
+    env["GAZEBO_LOG_PATH"] = str(gazebo_log_dir)
+    model_paths = [
+        "/home/hanchen/.gazebo/models",
+        "/usr/share/gazebo-11/models",
+        env.get("GAZEBO_MODEL_PATH", ""),
+    ]
+    env["GAZEBO_MODEL_PATH"] = ":".join(path for path in model_paths if path)
+    env["GAZEBO_MODEL_DATABASE_URI"] = ""
+    env["HOME"] = str(case_home)
     env["PYTHONUNBUFFERED"] = "1"
 
     launch_cmd = " ".join([
@@ -222,6 +237,8 @@ def run_case(
         "scenario": str(case.scenario),
         "run_dir": str(run_dir),
         "ros_domain_id": domain_id,
+        "gazebo_master_uri": env["GAZEBO_MASTER_URI"],
+        "case_home": str(case_home),
         "collector_returncode": collector_returncode,
         "elapsed_wall_s": round(time.time() - started_at, 3),
         "passed": passed,
@@ -266,6 +283,8 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_root = Path(args.out_root).expanduser() if args.out_root else Path(f"/tmp/thermal_world_scenario_matrix_{ts}")
     out_root.mkdir(parents=True, exist_ok=True)
+    if args.domain_start + len(cases) - 1 > 232:
+        raise ValueError("ROS_DOMAIN_ID must stay <= 232; lower --domain-start")
 
     results = []
     for idx, case in enumerate(cases):

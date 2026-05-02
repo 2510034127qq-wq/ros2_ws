@@ -619,6 +619,13 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertGreaterEqual(len(full_worlds), 6)
         self.assertGreaterEqual(len(full_scenarios), 9)
         self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
+        runner_text = runner_path.read_text()
+        self.assertIn('GAZEBO_MASTER_URI', runner_text)
+        self.assertIn('GAZEBO_LOG_PATH', runner_text)
+        self.assertIn('GAZEBO_MODEL_PATH', runner_text)
+        self.assertIn('GAZEBO_MODEL_DATABASE_URI', runner_text)
+        self.assertIn('case_home', runner_text)
+        self.assertIn('ROS_DOMAIN_ID must stay <= 232', runner_text)
 
     def test_T_PY24_nav2_progress_watchdog_is_configured(self):
         """T-PY24: Nav2 accepted-but-stalled goals must fall back to direct motion."""
@@ -633,7 +640,14 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('source_set_expansion_max_d', params_text)
         self.assertIn('source_set_outward_bonus', params_text)
         self.assertIn('source_set_lateral_bonus', params_text)
+        self.assertIn('source_set_lateral_max_d:        14.0', params_text)
         self.assertIn('_source_pair_lateral_yaws', controller_text)
+        self.assertIn('_single_source_expansion_target', controller_text)
+        self.assertIn('_single_source_sweep_idx', controller_text)
+        self.assertIn('fan_offsets', controller_text)
+        self.assertIn('[COARSE_WP/single_source/', controller_text)
+        self.assertIn('coarse_radius_overflow', controller_text)
+        self.assertIn('expansion = self._source_set_expansion_target(self._survey_wp_min_d)', controller_text)
         self.assertIn('departure_speed', params_text)
         self.assertIn('source_set_direct_first_s', params_text)
         self.assertIn('departure_progress_timeout_s', params_text)

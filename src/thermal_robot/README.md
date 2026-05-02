@@ -28,6 +28,10 @@ coverage gain, confirmed-source exclusion, and a medium-range FOV ring sweep.
 The ring sweep scores where the next thermal camera footprint will land, then
 penalizes recently used directions so post-confirm exploration does not keep
 expanding through the same sector.
+After the first confirmed source, the coarse planner uses a source-anchored
+fan sweep instead of repeatedly moving directly away from the heat peak.  This
+cycles oblique and outward sectors around the confirmed source, so 2-source and
+open-ended cases do not collapse into a single half-plane search.
 
 By default the thermal mapper and controller use an odom-aligned world frame
 (`thermal_mapper_node.pose_source=odom`,
@@ -214,18 +218,27 @@ islands_static_offset  recall=0.667 precision=1.000 duplicate=0
 Variable-source-count evidence from 2026-05-02:
 
 ```text
-/tmp/thermal_world_scenario_matrix_variable120_openended
-open_static_2src      truth=2 matched=1 recall=0.500 precision=1.000 duplicate=0
+/tmp/thermal_world_scenario_matrix_variable120_fan_ports
+open_static_2src      truth=2 matched=2 recall=1.000 precision=1.000 duplicate=0
 mixed_dynamic_4src    truth=4 matched=2 recall=0.500 precision=1.000 duplicate=0
 zigzag_dynamic_5src   truth=5 matched=2 recall=0.400 precision=1.000 duplicate=0
 ```
 
+Config-B 3-source regression after the same fan-sweep change:
+
+```text
+/tmp/thermal_world_scenario_matrix_configb_fan_ports
+open_config_b         truth=3 matched=2 recall=0.667 precision=1.000 duplicate=0
+```
+
 The extended run above used `--preset extended --duration 90 --warmup 36
 --min-recall 0.667`. The variable-source run used `--preset variable
---duration 120 --warmup 36 --min-recall 0.4`. These are regression gates, not a
-proof of full generalization. Use the full matrix, longer runtime, random
-seeds, multi-spawn tests, and different source counts before treating the
-algorithm as broadly validated.
+--duration 120 --warmup 36 --min-recall 0.4`. The matrix runner isolates each
+case with its own ROS domain, Gazebo master URI, temporary HOME, local Gazebo
+model path, and ROS log directory to avoid cross-case port/log/cache pollution.
+These are regression gates, not a proof of full generalization. Use the full
+matrix, longer runtime, random seeds, multi-spawn tests, and different source
+counts before treating the algorithm as broadly validated.
 
 ## Build
 
