@@ -41,6 +41,7 @@ class TrackedSource:
     covariance_yy: float = 2.0
     status: str = STATUS_CANDIDATE
     consecutive_observations: int = 1
+    ever_confirmed: bool = False
 
 
 class SourceTrackerCore:
@@ -60,6 +61,7 @@ class SourceTrackerCore:
         confirm_covariance_max: float = 0.9,
         stale_after_s: float = 12.0,
         stale_decay_s: float = 20.0,
+        duplicate_memory_s: float = 60.0,
         update_alpha_min: float = 0.08,
         max_detection_age_s: float = float("inf"),
     ):
@@ -75,6 +77,7 @@ class SourceTrackerCore:
         self.confirm_covariance_max = float(confirm_covariance_max)
         self.stale_after_s = float(stale_after_s)
         self.stale_decay_s = max(1e-3, float(stale_decay_s))
+        self.duplicate_memory_s = float(duplicate_memory_s)
         self.update_alpha_min = max(0.0, min(0.6, float(update_alpha_min)))
         self.max_detection_age_s = float(max_detection_age_s)
         self._tracks: Dict[str, TrackedSource] = {}
@@ -149,7 +152,7 @@ class SourceTrackerCore:
             if track is not None and track.track_id in updated_ids:
                 continue
             if track is None:
-                if self._near_confirmed(det):
+                if self._near_confirmed(det, now_s):
                     continue
                 track = self._new_track(det, now_s)
             else:
@@ -170,8 +173,8 @@ class SourceTrackerCore:
                 track.status = STATUS_STALE
 
         self._merge_close_tracks()
-        self._promote_confirmed()
-        self._suppress_duplicates()
+        self._promote_confirmed(now_s)
+        self._suppress_duplicates(now_s)
         return self.tracks
 
     def update_from_map(
@@ -203,18 +206,21 @@ class SourceTrackerCore:
             return best
         return None
 
-    def _near_confirmed(self, det: SourceDetection) -> bool:
+    def _near_confirmed(self, det: SourceDetection, now_s: float) -> bool:
         return any(
-            self._blocks_duplicate_birth(track)
+            self._blocks_duplicate_birth(track, now_s)
             and math.hypot(det.x - track.x, det.y - track.y) <= self.duplicate_radius_m
             for track in self._tracks.values()
         )
 
-    def _blocks_duplicate_birth(self, track: TrackedSource) -> bool:
-        return (
-            track.status in (STATUS_CONFIRMED, STATUS_STALE)
-            and track.observations >= self.confirm_observations
-        )
+    def _blocks_duplicate_birth(self, track: TrackedSource, now_s: Optional[float] = None) -> bool:
+        if track.status == STATUS_SUPPRESSED:
+            return False
+        if track.ever_confirmed:
+            if now_s is None or not math.isfinite(self.duplicate_memory_s):
+                return True
+            return max(0.0, now_s - track.last_seen_s) <= self.duplicate_memory_s
+        return track.status in (STATUS_CONFIRMED, STATUS_STALE) and track.observations >= self.confirm_observations
 
     def _new_track(self, det: SourceDetection, now_s: float) -> TrackedSource:
         track_id = f"src_{self._next_id}"
@@ -256,7 +262,7 @@ class SourceTrackerCore:
         track.covariance_xx = cov
         track.covariance_yy = cov
         if track.status == STATUS_STALE:
-            track.status = STATUS_CANDIDATE
+            track.status = STATUS_CONFIRMED if track.ever_confirmed else STATUS_CANDIDATE
 
     def _merge_close_tracks(self) -> None:
         tracks = sorted(
@@ -284,13 +290,14 @@ class SourceTrackerCore:
                 keep.last_update_s = max(keep.last_update_s, drop.last_update_s)
                 keep.covariance_xx = min(keep.covariance_xx, drop.covariance_xx)
                 keep.covariance_yy = min(keep.covariance_yy, drop.covariance_yy)
+                keep.ever_confirmed = keep.ever_confirmed or drop.ever_confirmed
                 drop.status = STATUS_SUPPRESSED
                 drop.existence_probability = min(drop.existence_probability, 0.05)
 
-    def _promote_confirmed(self) -> None:
+    def _promote_confirmed(self, now_s: float) -> None:
         confirmed_positions = [
             (t.x, t.y) for t in self._tracks.values()
-            if self._blocks_duplicate_birth(t)
+            if self._blocks_duplicate_birth(t, now_s)
         ]
         for track in self._tracks.values():
             if track.status not in (STATUS_CANDIDATE, STATUS_CONFIRMED):
@@ -311,15 +318,16 @@ class SourceTrackerCore:
                 and cov_ok
             ):
                 track.status = STATUS_CONFIRMED
+                track.ever_confirmed = True
                 confirmed_positions.append((track.x, track.y))
 
-    def _suppress_duplicates(self) -> None:
+    def _suppress_duplicates(self, now_s: float) -> None:
         confirmed = [
             t for t in self._tracks.values()
-            if self._blocks_duplicate_birth(t)
+            if self._blocks_duplicate_birth(t, now_s)
         ]
         for track in self._tracks.values():
-            if self._blocks_duplicate_birth(track):
+            if self._blocks_duplicate_birth(track, now_s):
                 continue
             if any(
                 c.track_id != track.track_id

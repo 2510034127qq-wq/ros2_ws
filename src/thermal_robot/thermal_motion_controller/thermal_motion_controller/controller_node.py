@@ -352,7 +352,7 @@ class ControllerNode(Node):
         self.declare_parameter('source_set_outward_bonus', 0.35)
         self.declare_parameter('source_set_lateral_directional_weight', 0.95)
         self.declare_parameter('source_set_lateral_bonus', 0.45)
-        self.declare_parameter('source_set_lateral_max_d', 14.0)
+        self.declare_parameter('source_set_lateral_max_d', 12.0)
         self.declare_parameter('source_set_direct_first_s', 32.0)
         self.declare_parameter('post_confirm_direct_first_s', 24.0)
         self.declare_parameter('post_confirm_immediate_departure', True)
@@ -579,6 +579,7 @@ class ControllerNode(Node):
         self._coarse_wp_count: int = 0
         self._coverage_recent_yaws: deque = deque(maxlen=self._coverage_recent_yaw_window)
         self._single_source_sweep_idx: int = 0
+        self._source_set_sweep_idx: int = 0
 
         # ── Cold field detection ──────────────────────────────────────────
         self._frontier_cold_start: Optional[float] = None
@@ -1167,6 +1168,7 @@ class ControllerNode(Node):
         anchor=None,
         min_travel_d=None,
         max_travel_d=None,
+        angle_span_rad=None,
     ):
         if not self._map_available():
             return None
@@ -1200,6 +1202,7 @@ class ControllerNode(Node):
             anchor_y=None if anchor is None else anchor[1],
             min_travel_d=min_travel_d,
             max_travel_d=max_travel_d,
+            angle_span_rad=angle_span_rad,
         )
         if target is None:
             return None
@@ -1334,22 +1337,32 @@ class ControllerNode(Node):
         if not self._map_available():
             return None
         cx, cy = self._sources_centroid()
-        yaw_candidates: List[Tuple[float, float, float, str, float]] = []
+        yaw_candidates: List[Tuple[float, float, float, str, float, float]] = []
         outward_yaw = math.atan2(cy - self._spawn_y, cx - self._spawn_x)
-        if math.hypot(cx - self._spawn_x, cy - self._spawn_y) > 1.0:
-            yaw_candidates.append((
-                outward_yaw,
-                self._source_set_outward_directional_weight,
-                self._source_set_outward_bonus,
-                'outward',
-                self._source_set_expansion_max_d))
         for yaw in self._source_pair_lateral_yaws():
             yaw_candidates.append((
                 yaw,
                 self._source_set_lateral_directional_weight,
                 self._source_set_lateral_bonus,
                 'source_lateral',
+                self._source_set_lateral_max_d,
                 self._source_set_lateral_max_d))
+        for yaw in self._source_set_gap_yaws(cx, cy):
+            yaw_candidates.append((
+                yaw,
+                self._source_set_expansion_directional_weight,
+                0.10,
+                'source_gap',
+                self._source_set_lateral_max_d,
+                self._source_set_lateral_max_d))
+        if math.hypot(cx - self._spawn_x, cy - self._spawn_y) > 1.0:
+            yaw_candidates.append((
+                outward_yaw,
+                self._source_set_outward_directional_weight,
+                self._source_set_outward_bonus,
+                'outward',
+                self._source_set_expansion_max_d,
+                self._source_set_expansion_max_d))
         sector = self._map_sector_yaw(
             min_d=min_travel_d,
             max_d=self._source_set_expansion_max_d,
@@ -1362,51 +1375,60 @@ class ControllerNode(Node):
                 self._source_set_expansion_directional_weight,
                 0.0,
                 'map_sector',
+                self._source_set_expansion_max_d,
                 self._source_set_expansion_max_d))
-        for yaw in self._source_set_gap_yaws(cx, cy):
-            yaw_candidates.append((
-                yaw,
-                self._source_set_expansion_directional_weight,
-                0.0,
-                'source_gap',
-                self._source_set_lateral_max_d))
         yaw_candidates.append((
             self._phase_yaw_for_coverage(),
             self._source_set_expansion_directional_weight,
             0.0,
             'coverage_phase',
+            self._source_set_expansion_max_d,
             self._source_set_expansion_max_d))
+        if not yaw_candidates:
+            return None
+        start = self._source_set_sweep_idx % len(yaw_candidates)
+        yaw_candidates = yaw_candidates[start:] + yaw_candidates[:start]
 
         best = None
         best_yaw = None
         best_label = 'source_set'
         best_eval_score = -float('inf')
+        priority = None
         seen = set()
-        for yaw, dir_weight, bonus, label, max_travel in yaw_candidates:
+        for order_idx, (yaw, dir_weight, bonus, label, max_travel, max_radius) in enumerate(yaw_candidates):
             key = round(_wrap_angle_local(yaw), 2)
             if key in seen:
                 continue
             seen.add(key)
+            angle_span = math.radians(70.0) if label in ('source_lateral', 'source_gap') else None
             target = self._map_coverage_ring(
                 min_radius=max(self._safe_dist() + 1.0, self._coverage_ring_min_d),
-                max_radius=max(self._coverage_ring_max_d, self._source_set_expansion_max_d),
+                max_radius=max(self._coverage_ring_min_d, max_radius),
                 safe_dist=max(self._survey_safe_dist, self._safe_dist()),
                 preferred_yaw=yaw,
                 directional_weight=dir_weight,
                 anchor=(cx, cy),
                 min_travel_d=min_travel_d,
                 max_travel_d=max(min_travel_d, max_travel),
+                angle_span_rad=angle_span,
             )
             if target is None:
                 continue
-            eval_score = target[2] + bonus
+            sequence_bonus = max(0.0, 0.65 - 0.13 * order_idx)
+            eval_score = target[2] + bonus + sequence_bonus
+            if priority is None and label in ('source_lateral', 'source_gap'):
+                priority = (target, yaw, (cx, cy), label)
             if best is None or eval_score > best_eval_score:
                 best = target
                 best_yaw = yaw
                 best_label = label
                 best_eval_score = eval_score
+        if priority is not None:
+            self._source_set_sweep_idx += 1
+            return priority
         if best is None:
             return None
+        self._source_set_sweep_idx += 1
         return best, best_yaw, (cx, cy), best_label
 
     def _best_departure_ring(self, cx: float, cy: float, min_travel_d: float):
@@ -2340,6 +2362,7 @@ class ControllerNode(Node):
                 self._conv_sticky_count=0; self._conv_best_global_T=0.0
                 self._conv_best_global_pos=None; self._conv_returning=False
                 self._single_source_sweep_idx=0
+                self._source_set_sweep_idx=0
                 self._T_max_unconf=self._ambient_est
                 self._pc_guard_t=now+self._pc_cooldown_s
                 self.get_logger().info(

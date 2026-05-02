@@ -164,6 +164,7 @@ def select_coverage_ring_target(
     anchor_y: Optional[float] = None,
     min_travel_d: Optional[float] = None,
     max_travel_d: Optional[float] = None,
+    angle_span_rad: Optional[float] = None,
 ) -> Optional[PlannerTarget]:
     """Select a medium-range sweep target by expected FOV information gain.
 
@@ -226,9 +227,16 @@ def select_coverage_ring_target(
 
     best: Optional[PlannerTarget] = None
     radii = np.linspace(float(min_radius), float(max_radius), max(1, int(num_rings)))
+    if angle_span_rad is None or float(angle_span_rad) >= math.pi * 2.0:
+        yaw_offsets = [idx * 2.0 * math.pi / float(num_angles) for idx in range(int(num_angles))]
+    elif int(num_angles) <= 1:
+        yaw_offsets = [0.0]
+    else:
+        span = max(0.0, float(angle_span_rad))
+        yaw_offsets = np.linspace(-span, span, int(num_angles))
     for radius in radii:
-        for idx in range(int(num_angles)):
-            yaw = _wrap_angle(base_yaw + idx * 2.0 * math.pi / float(num_angles))
+        for offset in yaw_offsets:
+            yaw = _wrap_angle(base_yaw + float(offset))
             tx = ax + float(radius) * math.cos(yaw)
             ty = ay + float(radius) * math.sin(yaw)
             if tx < map_min_x or tx > map_max_x or ty < map_min_y or ty > map_max_y:

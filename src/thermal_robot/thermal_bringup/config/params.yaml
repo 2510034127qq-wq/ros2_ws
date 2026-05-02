@@ -83,6 +83,7 @@ source_tracker_node:
     confirm_covariance_max:    0.9
     stale_after_s:            12.0
     stale_decay_s:            20.0
+    duplicate_memory_s:       60.0
     update_alpha_min:          0.08
     max_detection_age_s:       8.0
 
@@ -187,7 +188,7 @@ controller_node:
     source_set_outward_bonus:         0.35
     source_set_lateral_directional_weight: 0.95
     source_set_lateral_bonus:         0.45
-    source_set_lateral_max_d:        14.0
+    source_set_lateral_max_d:        12.0
     departure_speed:                  0.25
     source_set_direct_first_s:        32.0
     post_confirm_direct_first_s:      24.0

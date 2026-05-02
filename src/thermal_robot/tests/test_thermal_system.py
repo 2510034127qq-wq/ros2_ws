@@ -426,6 +426,52 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertEqual(len(confirmed), 0)
         self.assertEqual(len(tracker.tracks), 1)
 
+    def test_T_PY15b_stale_confirmed_source_reacquires_same_track(self):
+        """T-PY15b: stale 的 confirmed 源再次观测时恢复同一 track."""
+        tracker = SourceTrackerCore(
+            confirm_observations=5,
+            confirm_covariance_max=1.0,
+            duplicate_radius_m=2.5,
+            stale_after_s=2.0,
+            stale_decay_s=2.0,
+        )
+        for i in range(6):
+            tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        track_id = tracker.tracks[0].track_id
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
+        self.assertTrue(tracker.tracks[0].ever_confirmed)
+
+        tracker.update([], now_s=10.0)
+        self.assertEqual(tracker.tracks[0].status, 'stale')
+        tracker.update([SourceDetection(x=0.15, y=0.1, strength=17.0, confidence=0.9)], now_s=11.0)
+
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(tracker.tracks[0].track_id, track_id)
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
+        self.assertTrue(tracker.tracks[0].ever_confirmed)
+
+    def test_T_PY15c_expired_duplicate_memory_allows_new_birth(self):
+        """T-PY15c: 去重记忆过期后，旧源附近可重新出生候选源."""
+        tracker = SourceTrackerCore(
+            confirm_observations=5,
+            confirm_covariance_max=1.0,
+            duplicate_radius_m=2.5,
+            duplicate_memory_s=5.0,
+            gate_m=0.4,
+            stale_after_s=2.0,
+            stale_decay_s=20.0,
+        )
+        for i in range(6):
+            tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
+        tracker.update([], now_s=20.0)
+        self.assertEqual(tracker.tracks[0].status, 'stale')
+
+        tracker.update([SourceDetection(x=1.5, y=0.0, strength=16.0, confidence=0.9)], now_s=21.0)
+
+        active = [t for t in tracker.tracks if t.status != 'suppressed']
+        self.assertEqual(len(active), 2)
+        self.assertTrue(any(t.status == 'candidate' and abs(t.x - 1.5) < 0.1 for t in active))
+
     def test_T_PY16_tracker_counts_one_observation_per_map_update(self):
         """T-PY16: 同一张热图的相邻峰不能把一个 track 瞬间刷到 confirmed."""
         tracker = SourceTrackerCore(confirm_observations=5, confirm_covariance_max=1.0)
@@ -640,11 +686,15 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('source_set_expansion_max_d', params_text)
         self.assertIn('source_set_outward_bonus', params_text)
         self.assertIn('source_set_lateral_bonus', params_text)
-        self.assertIn('source_set_lateral_max_d:        14.0', params_text)
+        self.assertIn('source_set_lateral_max_d:        12.0', params_text)
+        self.assertIn('duplicate_memory_s:       60.0', params_text)
         self.assertIn('_source_pair_lateral_yaws', controller_text)
         self.assertIn('_single_source_expansion_target', controller_text)
         self.assertIn('_single_source_sweep_idx', controller_text)
         self.assertIn('fan_offsets', controller_text)
+        self.assertIn('_source_set_sweep_idx', controller_text)
+        self.assertIn("label in ('source_lateral', 'source_gap')", controller_text)
+        self.assertIn('sequence_bonus = max(0.0, 0.65', controller_text)
         self.assertIn('[COARSE_WP/single_source/', controller_text)
         self.assertIn('coarse_radius_overflow', controller_text)
         self.assertIn('expansion = self._source_set_expansion_target(self._survey_wp_min_d)', controller_text)
@@ -752,6 +802,42 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
 
         self.assertEqual(module.source_match_radius({'sigma': '0.3'}, {'sigma': '0.4'}), 2.0)
         self.assertEqual(module.source_match_radius({'sigma': '1.0'}, {'sigma': '0.5'}), 2.0)
+
+    def test_T_PY28_coverage_ring_can_be_constrained_to_yaw_sector(self):
+        """T-PY28: source-set 扫掠可限制在目标扇区内，而不是只软偏置方向."""
+        width = height = 80
+        origin_x = origin_y = -10.0
+        resolution = 0.25
+        variance = np.ones((height, width), dtype=np.float32)
+        confidence = np.zeros((height, width), dtype=np.float32)
+        visits = np.zeros((height, width), dtype=np.float32)
+        age = np.full((height, width), 60.0, dtype=np.float32)
+
+        target = select_coverage_ring_target(
+            robot_wx=0.0, robot_wy=0.0,
+            width=width, height=height, resolution=resolution,
+            origin_x=origin_x, origin_y=origin_y,
+            temperature_variance=variance,
+            confidence=confidence,
+            visit_count=visits,
+            last_seen_age_s=age,
+            min_radius=5.0,
+            max_radius=5.0,
+            safe_dist=2.0,
+            footprint_radius=2.5,
+            preferred_yaw=-math.pi * 0.75,
+            directional_weight=0.6,
+            num_angles=16,
+            num_rings=1,
+            angle_span_rad=math.radians(20.0),
+        )
+
+        self.assertIsNotNone(target)
+        yaw = math.atan2(target.y, target.x)
+        diff = math.atan2(math.sin(yaw + math.pi * 0.75), math.cos(yaw + math.pi * 0.75))
+        self.assertLess(abs(diff), math.radians(25.0))
+        self.assertLess(target.x, -2.0)
+        self.assertLess(target.y, -2.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

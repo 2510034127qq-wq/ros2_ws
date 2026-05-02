@@ -27,6 +27,7 @@ class SourceTrackerNode(Node):
         self.declare_parameter('confirm_covariance_max', 0.9)
         self.declare_parameter('stale_after_s', 12.0)
         self.declare_parameter('stale_decay_s', 20.0)
+        self.declare_parameter('duplicate_memory_s', 60.0)
         self.declare_parameter('update_alpha_min', 0.08)
         self.declare_parameter('max_detection_age_s', 8.0)
 
@@ -44,6 +45,7 @@ class SourceTrackerNode(Node):
             confirm_covariance_max=float(g('confirm_covariance_max').value),
             stale_after_s=float(g('stale_after_s').value),
             stale_decay_s=float(g('stale_decay_s').value),
+            duplicate_memory_s=float(g('duplicate_memory_s').value),
             update_alpha_min=float(g('update_alpha_min').value),
             max_detection_age_s=float(g('max_detection_age_s').value),
         )

@@ -215,16 +215,24 @@ zigzag_circular        recall=1.000 precision=1.000 duplicate=0
 islands_static_offset  recall=0.667 precision=1.000 duplicate=0
 ```
 
-Variable-source-count evidence from 2026-05-02:
+Latest variable-source-count evidence from 2026-05-02:
 
 ```text
-/tmp/thermal_world_scenario_matrix_variable120_fan_ports
+/tmp/thermal_world_scenario_matrix_variable120_sector_bound
 open_static_2src      truth=2 matched=2 recall=1.000 precision=1.000 duplicate=0
-mixed_dynamic_4src    truth=4 matched=2 recall=0.500 precision=1.000 duplicate=0
+mixed_dynamic_4src    truth=4 matched=3 recall=0.750 precision=1.000 duplicate=0
 zigzag_dynamic_5src   truth=5 matched=2 recall=0.400 precision=1.000 duplicate=0
 ```
 
-Config-B 3-source regression after the same fan-sweep change:
+The same 5-source zigzag case also produced a 3/5 run after the source-set
+sector-bound sweep change:
+
+```text
+/tmp/thermal_world_scenario_matrix_zigzag5_sector_bound
+zigzag_dynamic_5src   truth=5 matched=3 recall=0.600 precision=1.000 duplicate=0
+```
+
+Config-B 3-source regression after the fan-sweep change:
 
 ```text
 /tmp/thermal_world_scenario_matrix_configb_fan_ports
@@ -236,9 +244,11 @@ The extended run above used `--preset extended --duration 90 --warmup 36
 --duration 120 --warmup 36 --min-recall 0.4`. The matrix runner isolates each
 case with its own ROS domain, Gazebo master URI, temporary HOME, local Gazebo
 model path, and ROS log directory to avoid cross-case port/log/cache pollution.
-These are regression gates, not a proof of full generalization. Use the full
-matrix, longer runtime, random seeds, multi-spawn tests, and different source
-counts before treating the algorithm as broadly validated.
+These are regression gates, not a proof of full generalization. The 5-source
+zigzag case is still volatile at 120s and should be treated as the current
+stress target. Use the full matrix, longer runtime, random seeds, multi-spawn
+tests, and different source counts before treating the algorithm as broadly
+validated.
 
 ## Build
 
