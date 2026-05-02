@@ -29,6 +29,12 @@ The ring sweep scores where the next thermal camera footprint will land, then
 penalizes recently used directions so post-confirm exploration does not keep
 expanding through the same sector.
 
+By default the thermal mapper and controller use an odom-aligned world frame
+(`thermal_mapper_node.pose_source=odom`,
+`controller_node.thermal_pose_source=odom`).  This keeps the projected thermal
+map in the same physical frame as the simulated thermal camera; Nav2 goals are
+still converted to `map` using the live TF pose when available.
+
 The main launch file is:
 
 ```bash
@@ -177,19 +183,20 @@ python3 src/thermal_robot/scripts/run_multiscenario_matrix.py \
 Latest extended evidence from 2026-05-02:
 
 ```text
-/tmp/thermal_world_scenario_matrix_extended_optimized90
-open_config_b          recall=0.667 precision=1.000 duplicate=0
-obstacle_linear        recall=1.000 precision=1.000 duplicate=0
+/tmp/thermal_world_scenario_matrix_extended_odom_immediate90
+open_config_b          recall=1.000 precision=1.000 duplicate=0
+obstacle_linear        recall=0.667 precision=1.000 duplicate=0
 corridor_appear        recall=0.667 precision=1.000 duplicate=0
 mixed_waypoint         recall=0.667 precision=1.000 duplicate=0
-zigzag_circular        recall=0.667 precision=1.000 duplicate=0
-islands_static_offset  recall=0.333 precision=1.000 duplicate=0
+zigzag_circular        recall=1.000 precision=1.000 duplicate=0
+islands_static_offset  recall=0.667 precision=1.000 duplicate=0
 ```
 
-This is a stronger regression gate than the 4-case representative matrix, but
-still not a proof of full generalization. Use the full matrix, longer runtime,
-random seeds, multi-spawn tests, and different source counts before treating
-the algorithm as broadly validated.
+This run used `--preset extended --duration 90 --warmup 36 --min-recall 0.667`.
+It is a stronger regression gate than the earlier 4-case representative matrix,
+but still not a proof of full generalization. Use the full matrix, longer
+runtime, random seeds, multi-spawn tests, and different source counts before
+treating the algorithm as broadly validated.
 
 ## Build
 
@@ -375,7 +382,7 @@ ASCENT           direct gradient following
 CONVERGE         slow fine approach to a source
 SAMPLE           stop and confirm a source
 AT_PEAK          hold after confirmation
-RELOCATE         leave confirmed source exclusion zone
+RELOCATE         optional fallback for leaving confirmed source exclusion zone
 DEPARTURE        direct move away from known-source centroid
 ESCAPE           stuck or exclusion-zone recovery
 DONE             all expected sources found
