@@ -48,11 +48,20 @@ for rel in [
 from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
 from thermal_motion_controller.planning import (
     PlannerSource,
+    PlannerWeights,
     select_coverage_ring_target,
     select_exploration_sector_yaw,
     select_information_gain_target,
 )
 from thermal_motion_controller.source_tracking import SourceDetection, SourceTrackerCore
+from thermal_motion_controller.target_selection import (
+    EXECUTION_DIRECT_FIRST,
+    EXECUTION_NAV2_PREFERRED,
+    SOURCE_SEEK_STRATEGY,
+    SourceSeekConfig,
+    SourceSeekContext,
+    SourceSeekTargetSelector,
+)
 from thermal_sensor_sim.scenario import default_config_b_scenario, load_scenario_file
 
 
@@ -116,6 +125,73 @@ def kalman_filter_sequence(measurements: np.ndarray,
         p_est  = (1.0 - k) * p_pred
         out.append(x_est)
     return np.array(out, dtype=np.float32)
+
+
+def make_unknown_thermal_map(width: int = 80, height: int = 80,
+                             origin_x: float = -10.0, origin_y: float = -10.0,
+                             resolution: float = 0.25) -> Dict:
+    return {
+        'width': width,
+        'height': height,
+        'resolution': resolution,
+        'origin_x': origin_x,
+        'origin_y': origin_y,
+        'temperature_variance': np.ones((height, width), dtype=np.float32),
+        'confidence': np.zeros((height, width), dtype=np.float32),
+        'visit_count': np.zeros((height, width), dtype=np.float32),
+        'last_seen_age_s': np.full((height, width), 60.0, dtype=np.float32),
+    }
+
+
+def make_source_seek_selector() -> SourceSeekTargetSelector:
+    return SourceSeekTargetSelector(SourceSeekConfig(
+        source_repulsion_k=0.8,
+        source_repulsion_min_dist=0.5,
+        source_exclusion_radius=2.0,
+        frontier_safe_buf=0.3,
+        survey_safe_dist=4.0,
+        pc_min_d=5.0,
+        pc_dist_sigma=15.0,
+        coverage_directional_weight=0.65,
+        departure_directional_weight=0.55,
+        coverage_ring_min_d=4.0,
+        coverage_ring_max_d=9.0,
+        coverage_ring_fov_radius=3.0,
+        coverage_ring_angles=24,
+        coverage_ring_rings=3,
+        coverage_recent_yaw_penalty=0.45,
+        coverage_recent_yaw_window=5,
+        source_set_expansion_min_sources=2,
+        source_set_expansion_max_d=13.0,
+        source_set_expansion_directional_weight=0.35,
+        source_set_outward_directional_weight=0.85,
+        source_set_outward_bonus=0.35,
+        source_set_lateral_directional_weight=0.95,
+        source_set_lateral_bonus=0.45,
+        source_set_lateral_max_d=12.0,
+        departure_dist=9.0,
+        planner_weights=PlannerWeights(),
+        planner_map_stale_s=5.0,
+    ))
+
+
+def make_source_seek_context(found_sources: List[Tuple[float, float, float]]) -> SourceSeekContext:
+    return SourceSeekContext(
+        now=10.0,
+        robot_wx=0.0,
+        robot_wy=0.0,
+        odom_yaw=0.0,
+        spawn_x=-6.0,
+        spawn_y=0.0,
+        search_rounds=0,
+        coarse_wp_count=0,
+        found_sources=found_sources,
+        tracker_sources=[],
+        tracker_sources_t=10.0,
+        thermal_map=make_unknown_thermal_map(),
+        thermal_map_t=10.0,
+        belief_map=None,
+    )
 
 
 def gradient_ascent(field: np.ndarray,
@@ -676,28 +752,35 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
     def test_T_PY24_nav2_progress_watchdog_is_configured(self):
         """T-PY24: Nav2 accepted-but-stalled goals must fall back to direct motion."""
         controller_path = WORKSPACE / 'src/thermal_robot/thermal_motion_controller/thermal_motion_controller/controller_node.py'
+        selector_path = WORKSPACE / 'src/thermal_robot/thermal_motion_controller/thermal_motion_controller/target_selection.py'
         params_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/params.yaml'
         controller_text = controller_path.read_text()
+        selector_text = selector_path.read_text()
         params_text = params_path.read_text()
         self.assertIn('nav2_progress_timeout_s', controller_text)
         self.assertIn('_nav2_progress_stalled', controller_text)
-        self.assertIn('_source_set_expansion_target', controller_text)
+        self.assertIn('SourceSeekTargetSelector', controller_text)
+        self.assertIn('SourceSeekContext', controller_text)
+        self.assertIn('select_frontier', selector_text)
+        self.assertIn('select_coarse_waypoint', selector_text)
+        self.assertIn('select_departure', selector_text)
+        self.assertIn('SOURCE_SEEK_STRATEGY', selector_text)
+        self.assertIn('EXECUTION_DIRECT_FIRST', selector_text)
         self.assertIn('nav2_stall_direct_s', params_text)
         self.assertIn('source_set_expansion_max_d', params_text)
         self.assertIn('source_set_outward_bonus', params_text)
         self.assertIn('source_set_lateral_bonus', params_text)
         self.assertIn('source_set_lateral_max_d:        12.0', params_text)
         self.assertIn('duplicate_memory_s:       60.0', params_text)
-        self.assertIn('_source_pair_lateral_yaws', controller_text)
-        self.assertIn('_single_source_expansion_target', controller_text)
-        self.assertIn('_single_source_sweep_idx', controller_text)
-        self.assertIn('fan_offsets', controller_text)
-        self.assertIn('_source_set_sweep_idx', controller_text)
-        self.assertIn("label in ('source_lateral', 'source_gap')", controller_text)
-        self.assertIn('sequence_bonus = max(0.0, 0.65', controller_text)
-        self.assertIn('[COARSE_WP/single_source/', controller_text)
+        self.assertIn('_source_pair_lateral_yaws', selector_text)
+        self.assertIn('_single_source_expansion_target', selector_text)
+        self.assertIn('_single_source_sweep_idx', selector_text)
+        self.assertIn('fan_offsets', selector_text)
+        self.assertIn('_source_set_sweep_idx', selector_text)
+        self.assertIn('label in ("source_lateral", "source_gap")', selector_text)
+        self.assertIn('sequence_bonus = max(0.0, 0.65', selector_text)
+        self.assertIn('[COARSE_WP/', controller_text)
         self.assertIn('coarse_radius_overflow', controller_text)
-        self.assertIn('expansion = self._source_set_expansion_target(self._survey_wp_min_d)', controller_text)
         self.assertIn('departure_speed', params_text)
         self.assertIn('source_set_direct_first_s', params_text)
         self.assertIn('departure_progress_timeout_s', params_text)
@@ -838,6 +921,56 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertLess(abs(diff), math.radians(25.0))
         self.assertLess(target.x, -2.0)
         self.assertLess(target.y, -2.0)
+
+    def test_T_PY29_nav2_bt_xml_path_is_launch_portable(self):
+        """T-PY29: Nav2 BT XML 由 launch 动态定位，不再绑定本机 install 路径."""
+        launch_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/launch/sim_nav_slam_launch.py'
+        nav2_params_path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/nav2_params.yaml'
+        launch_text = launch_path.read_text()
+        nav2_text = nav2_params_path.read_text()
+        self.assertIn("nav2_bt_xml", launch_text)
+        self.assertIn("navigate_to_pose_simple.xml", launch_text)
+        self.assertIn("'default_nav_to_pose_bt_xml': nav2_bt_xml", launch_text)
+        self.assertIn("'default_nav_through_poses_bt_xml': nav2_bt_xml", launch_text)
+        self.assertNotIn('/home/hanchen/ros2_ws/install', nav2_text)
+        self.assertNotIn('/home/hanchen/ros2_ws/install', launch_text)
+
+    def test_T_PY30_source_seek_selector_single_source_waypoint(self):
+        """T-PY30: source_seek selector 为单源后续搜索输出可执行目标与原因."""
+        selector = make_source_seek_selector()
+        ctx = make_source_seek_context(found_sources=[(0.0, 0.0, 50.0)])
+        target = selector.select_coarse_waypoint(ctx, min_d=5.0, max_d=14.0)
+        self.assertIsNotNone(target)
+        self.assertEqual(target.strategy, SOURCE_SEEK_STRATEGY)
+        self.assertEqual(target.execution_hint, EXECUTION_NAV2_PREFERRED)
+        self.assertIn(target.metadata.get('label'), {'single_fan', 'single_map_sector', 'coverage_phase'})
+        self.assertGreaterEqual(math.hypot(target.x-ctx.robot_wx, target.y-ctx.robot_wy), 5.0)
+        self.assertGreater(math.hypot(target.x, target.y), 2.0)
+
+    def test_T_PY31_source_seek_selector_source_set_lateral_direct_first(self):
+        """T-PY31: 多源 source-set 扩张优先 lateral/gap 方向并提示 direct-first."""
+        selector = make_source_seek_selector()
+        ctx = make_source_seek_context(found_sources=[(-2.0, 0.0, 50.0), (2.0, 0.0, 48.0)])
+        target = selector.select_coarse_waypoint(ctx, min_d=5.0, max_d=14.0)
+        self.assertIsNotNone(target)
+        self.assertEqual(target.strategy, SOURCE_SEEK_STRATEGY)
+        self.assertEqual(target.execution_hint, EXECUTION_DIRECT_FIRST)
+        self.assertIn(target.metadata.get('label'), {'source_lateral', 'source_gap'})
+        yaw = math.atan2(target.y - ctx.robot_wy, target.x - ctx.robot_wx)
+        self.assertGreater(abs(math.sin(yaw)), 0.6)
+        self.assertGreaterEqual(math.hypot(target.x-ctx.robot_wx, target.y-ctx.robot_wy), 5.0)
+
+    def test_T_PY32_nav2_health_check_script_covers_lifecycle_topics_and_tf(self):
+        """T-PY32: Nav2 健康检查入口覆盖 lifecycle、/plan、/cmd_vel 和 TF."""
+        script_path = WORKSPACE / 'src/thermal_robot/scripts/nav2_health_check.py'
+        text = script_path.read_text()
+        self.assertIn('NAV2_LIFECYCLE_NODES', text)
+        self.assertIn('/planner_server', text)
+        self.assertIn('/controller_server', text)
+        self.assertIn('/bt_navigator', text)
+        self.assertIn('/plan', text)
+        self.assertIn('/cmd_vel', text)
+        self.assertIn('lookup_transform', text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -46,6 +46,7 @@ def generate_launch_description():
     rviz_config   = os.path.join(bringup_dir, 'rviz',    'thermal_nav_slam.rviz')
     params_file   = os.path.join(bringup_dir, 'config',  'params.yaml')
     nav2_params   = os.path.join(bringup_dir, 'config',  'nav2_params.yaml')
+    nav2_bt_xml   = os.path.join(bringup_dir, 'config',  'navigate_to_pose_simple.xml')
     slam_params   = os.path.join(bringup_dir, 'config',  'slam_params.yaml')
     urdf_path     = os.path.join(g1_dir,      'urdf',    'g1_nav.urdf')  # v2（含激光雷达）
 
@@ -194,7 +195,11 @@ def generate_launch_description():
                 package='nav2_bt_navigator',
                 executable='bt_navigator',
                 name='bt_navigator',
-                parameters=[nav2_params, {'use_sim_time': use_sim_t}],
+                parameters=[nav2_params, {
+                    'use_sim_time': use_sim_t,
+                    'default_nav_to_pose_bt_xml': nav2_bt_xml,
+                    'default_nav_through_poses_bt_xml': nav2_bt_xml,
+                }],
                 output='screen',
             ),
             # waypoint_follower：路径点跟随（可选）

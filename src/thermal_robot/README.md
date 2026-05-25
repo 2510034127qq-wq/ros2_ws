@@ -345,6 +345,7 @@ t=20s  colorizer_node + RViz, when use_rviz:=true
 After launch, check core runtime state:
 
 ```bash
+python3 src/thermal_robot/scripts/nav2_health_check.py --timeout 20
 ros2 node list
 ros2 action info /navigate_to_pose
 ros2 lifecycle get /planner_server
