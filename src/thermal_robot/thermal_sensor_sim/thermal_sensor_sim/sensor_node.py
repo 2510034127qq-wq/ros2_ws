@@ -29,6 +29,7 @@ from thermal_sensor_sim.scenario import (
     SPAWN_X,
     SPAWN_Y,
     SourceState,
+    apply_run_seed,
     default_config_b_scenario,
     load_scenario_file,
 )
@@ -47,6 +48,8 @@ class SensorNode(Node):
         self.declare_parameter('random_seed',   42)
         self.declare_parameter('num_sources',   3)
         self.declare_parameter('scenario_file', '')
+        self.declare_parameter('scenario_seed', 0)
+        self.declare_parameter('scenario_jitter_std_m', 0.0)
 
         self._rate    = float(self.get_parameter('publish_rate').value)
         self._frame   = self.get_parameter('frame_id').value
@@ -57,14 +60,18 @@ class SensorNode(Node):
         seed          = int(self.get_parameter('random_seed').value)
         n_src         = int(self.get_parameter('num_sources').value)
         scenario_file = str(self.get_parameter('scenario_file').value or '')
+        scenario_seed = int(self.get_parameter('scenario_seed').value)
+        jitter_std    = float(self.get_parameter('scenario_jitter_std_m').value)
 
-        self._rng     = np.random.default_rng(seed)
+        noise_seed = scenario_seed if scenario_seed > 0 else seed
+        self._rng     = np.random.default_rng(noise_seed)
         if scenario_file:
             self._scenario = load_scenario_file(scenario_file, num_sources=0)
             self._scenario_label = scenario_file
         else:
             self._scenario = default_config_b_scenario(n_src)
             self._scenario_label = 'Config-B fallback'
+        apply_run_seed(self._scenario, scenario_seed, jitter_std_m=jitter_std)
         self._sources = self._scenario.sources
         self._spawn_x = self._scenario.spawn_x
         self._spawn_y = self._scenario.spawn_y
@@ -102,7 +109,8 @@ class SensorNode(Node):
         self.get_logger().info(
             f'sensor_node v13 | {self._W}×{self._H} | {self._rate}Hz '
             f'| spawn=({self._spawn_x},{self._spawn_y}) | T_init={T_init:.1f}°C '
-            f'| scenario={self._scenario_label} | sources={len(self._sources)}')
+            f'| scenario={self._scenario_label} | sources={len(self._sources)} '
+            f'| run_seed={scenario_seed}')
 
     def _odom_cb(self, msg: Odometry):
         self._odom_x = msg.pose.pose.position.x

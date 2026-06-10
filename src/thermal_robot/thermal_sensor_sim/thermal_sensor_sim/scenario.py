@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import random
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -177,6 +179,26 @@ class ThermalScenario:
 
     def all_states(self, t: float) -> List[SourceState]:
         return [src.state(t) for src in self.sources]
+
+
+def apply_run_seed(scenario: "ThermalScenario", run_seed: int,
+                   jitter_std_m: float = 0.0,
+                   amplitude_jitter_frac: float = 0.0) -> "ThermalScenario":
+    """Apply a deterministic run-level seed to scenario-local randomness."""
+    if run_seed is None or int(run_seed) <= 0:
+        return scenario
+    run_seed = int(run_seed)
+    for src in scenario.sources:
+        rng = random.Random(run_seed * 1000003
+                            + zlib.crc32(src.source_id.encode('utf-8')))
+        src.seed = src.seed + run_seed * 1000
+        if jitter_std_m > 0.0:
+            src.world_x += rng.gauss(0.0, jitter_std_m)
+            src.world_y += rng.gauss(0.0, jitter_std_m)
+        if amplitude_jitter_frac > 0.0:
+            src.amplitude = max(1.0, src.amplitude
+                                * (1.0 + rng.gauss(0.0, amplitude_jitter_frac)))
+    return scenario
 
 
 def default_config_b_sources() -> List[DynamicHeatSource]:

@@ -35,6 +35,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -60,6 +61,9 @@ def generate_launch_description():
     use_sim_t    = LaunchConfiguration('use_sim_time', default='false')
     scenario_file = LaunchConfiguration('scenario_file', default='')
     world_file = LaunchConfiguration('world_file', default=default_world_file)
+    run_seed = LaunchConfiguration('run_seed', default='0')
+    strategy = LaunchConfiguration('strategy', default='full')
+    scenario_jitter = LaunchConfiguration('scenario_jitter_std_m', default='0.0')
 
     gz_env = dict(os.environ)
     gz_env['QT_QPA_PLATFORM']   = 'xcb'
@@ -86,6 +90,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('scenario_file', default_value=''),
         DeclareLaunchArgument('world_file', default_value=default_world_file),
+        DeclareLaunchArgument('run_seed', default_value='0'),
+        DeclareLaunchArgument('strategy', default_value='full'),
+        DeclareLaunchArgument('scenario_jitter_std_m', default_value='0.0'),
 
         # ══════════════════════════════════════════════════════════════════
         # t=0s: Gazebo + Robot State Publisher
@@ -243,6 +250,8 @@ def generate_launch_description():
                 parameters=[params_file, {
                     'use_sim_time': use_sim_t,
                     'scenario_file': scenario_file,
+                    'scenario_seed': ParameterValue(run_seed, value_type=int),
+                    'scenario_jitter_std_m': ParameterValue(scenario_jitter, value_type=float),
                 }],
                 output='both',
             ),
@@ -288,7 +297,11 @@ def generate_launch_description():
                 package='thermal_motion_controller',
                 executable='controller_node',
                 name='controller_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file, {
+                    'use_sim_time': use_sim_t,
+                    'random_seed': ParameterValue(run_seed, value_type=int),
+                    'strategy': strategy,
+                }],
                 output='both',
             ),
         ]),

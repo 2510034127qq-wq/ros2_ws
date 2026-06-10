@@ -299,6 +299,8 @@ class ControllerNode(Node):
         self.declare_parameter('post_confirm_min_d',          7.0)
         self.declare_parameter('post_confirm_dist_sigma',    15.0)
         self.declare_parameter('levy_post_confirm_step',     10.0)
+        self.declare_parameter('random_seed',                 0)
+        self.declare_parameter('strategy',                    'full')
         self.declare_parameter('sample_min_trise',            8.0)
         self.declare_parameter('post_confirm_cooldown_s',   60.0)
         self.declare_parameter('adaptive_thresholds_enabled', True)
@@ -426,6 +428,14 @@ class ControllerNode(Node):
         self._pc_min_d            = float(g('post_confirm_min_d').value)
         self._pc_dist_sigma       = float(g('post_confirm_dist_sigma').value)
         self._levy_pc_step        = float(g('levy_post_confirm_step').value)
+        self._random_seed         = int(g('random_seed').value)
+        self._strategy_mode       = str(g('strategy').value or 'full')
+        if self._strategy_mode not in ('full', 'frontier', 'levy'):
+            self.get_logger().warn(f'unknown strategy={self._strategy_mode}, using full')
+            self._strategy_mode = 'full'
+        if self._random_seed > 0:
+            random.seed(self._random_seed)
+            np.random.seed(self._random_seed % (2**31))
         self._sample_min_trise    = float(g('sample_min_trise').value)
         self._pc_cooldown_s       = float(g('post_confirm_cooldown_s').value)
         self._adaptive_thresh     = bool(g('adaptive_thresholds_enabled').value)
@@ -666,6 +676,8 @@ class ControllerNode(Node):
             f'COARSE→Nav2+fallback | FINE→direct /cmd_vel | '
             f'pose_source={self._pose_source} | '
             f'spawn=({self._spawn_x},{self._spawn_y}) | num_sources={self._num_src}')
+        self.get_logger().info(
+            f'strategy={self._strategy_mode} random_seed={self._random_seed}')
 
     # ────────────────────────────────────────────────────────────────────────
     # Pose update: thermal world can use odom; Nav2 still gets map goals.
@@ -1310,6 +1322,10 @@ class ControllerNode(Node):
                              self._levy_min,self._levy_max))
 
     def _refresh_frontier(self, now, force=False):
+        if self._strategy_mode == 'levy':
+            if force or (now - self._frontier_last_upd) >= self._frontier_upd:
+                self._do_levy_jump(now)
+            return
         if not force and (now-self._frontier_last_upd)<self._frontier_upd:
             return
         self._frontier_last_upd=now
@@ -1336,6 +1352,17 @@ class ControllerNode(Node):
             self._do_levy_jump(now)
 
     def _do_levy_jump(self, now):
+        if self._strategy_mode == 'frontier':
+            target = self._source_seek_selector.select_frontier(
+                self._strategy_context(now), min_d=2.0, max_d=16.0, dist_sigma=8.0)
+            if target is not None:
+                fx, fy = target.xy
+                self._frontier_target = (fx, fy)
+                self._frontier_last_upd = now
+                self._search_rounds = 0
+                self.get_logger().info(
+                    f'[FRONTIER/baseline-fallback] →({fx:.1f},{fy:.1f})')
+                return
         step=self._levy_step()
         target = self._source_seek_selector.select_levy_jump(
             self._strategy_context(now),
@@ -1483,11 +1510,24 @@ class ControllerNode(Node):
     # ────────────────────────────────────────────────────────────────────────
 
     def _coarse_waypoint(self):
-        target = self._source_seek_selector.select_coarse_waypoint(
-            self._strategy_context(),
-            min_d=self._survey_wp_min_d,
-            max_d=self._survey_wp_max_d,
-        )
+        if self._strategy_mode == 'frontier':
+            target = self._source_seek_selector.select_frontier(
+                self._strategy_context(),
+                min_d=self._survey_wp_min_d,
+                max_d=self._survey_wp_max_d,
+                dist_sigma=8.0,
+            )
+        elif self._strategy_mode == 'levy':
+            target = self._source_seek_selector.select_levy_jump(
+                self._strategy_context(),
+                step=self._levy_step(),
+            )
+        else:
+            target = self._source_seek_selector.select_coarse_waypoint(
+                self._strategy_context(),
+                min_d=self._survey_wp_min_d,
+                max_d=self._survey_wp_max_d,
+            )
         if target is None:
             self._coarse_wp_execution_hint = 'nav2_preferred'
             return None

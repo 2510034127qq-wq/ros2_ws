@@ -1,0 +1,32 @@
+name: static_five_sources
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: S1_north
+    xy: [-2.0, 4.0]
+    amplitude: 30.0
+    sigma_m: 1.0
+    motion: static
+  - id: S2_east
+    xy: [5.5, 1.5]
+    amplitude: 24.0
+    sigma_m: 0.9
+    motion: static
+  - id: S3_southeast
+    xy: [3.0, -5.0]
+    amplitude: 20.0
+    sigma_m: 0.9
+    motion: static
+  - id: S4_southwest
+    xy: [-7.0, -5.5]
+    amplitude: 18.0
+    sigma_m: 0.85
+    motion: static
+  - id: S5_west_weak
+    xy: [-10.0, 2.5]
+    amplitude: 16.0
+    sigma_m: 0.8
+    motion: static
