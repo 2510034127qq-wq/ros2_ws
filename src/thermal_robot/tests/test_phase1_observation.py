@@ -56,6 +56,13 @@ class TestGridGeometry:
         assert g.origin_x == grid_geometry.GRID_CENTER_X - grid_geometry.GRID_SIZE_M / 2.0
         assert g.origin_y == grid_geometry.GRID_CENTER_Y - grid_geometry.GRID_SIZE_M / 2.0
 
+    def test_existing_npz_origin_matches(self):
+        sample = ROBOT / "thermal_bringup" / "worlds" / "occupancy" / "thermal_scene_nav.npz"
+        assert sample.exists()
+        with np.load(sample) as f:
+            assert float(f["origin_x"]) == pytest.approx(
+                grid_geometry.GRID_CENTER_X - grid_geometry.GRID_SIZE_M / 2.0)
+
 
 class TestObservationContract:
     def test_contract_fields_and_legacy_reexport(self):
@@ -123,6 +130,18 @@ class TestVisibility:
         assert visibility.line_reachable(occ, 0.0, 0.0, 1.0, 0.0)
         assert not visibility.line_reachable(occ, 0.0, 0.0, 4.0, 0.0)
         assert visibility.line_reachable(None, 0.0, 0.0, 4.0, 0.0)
+
+    def test_speed_budget(self):
+        # 200 条 2.5m 射线必须远低于算力预算 (粗略上限 50ms)
+        import time as _t
+        from thermal_field_reconstructor import visibility
+        occ = visibility.OccupancyView(
+            -5.0, -5.0, 0.05, np.zeros((200, 200), dtype=np.int16))
+        ang = np.linspace(0, 2 * math.pi, 200)
+        t0 = _t.monotonic()
+        visibility.visible_mask(occ, 0.0, 0.0,
+                                2.5 * np.cos(ang), 2.5 * np.sin(ang), step_m=0.1)
+        assert (_t.monotonic() - t0) < 0.05
 
 
 class TestThreeStateFusion:
@@ -260,6 +279,34 @@ class TestClearance:
         claimed = np.array([0.9] * 10)
         assert clearance.expected_calibration_error(claimed, np.array([1] * 9 + [0])) == pytest.approx(0.0)
         assert clearance.expected_calibration_error(claimed, np.array([1] * 5 + [0] * 5)) == pytest.approx(0.4)
+
+    def test_monte_carlo_calibration(self):
+        """生成式自洽: 按模型采样世界与覆盖, 宣称概率应校准 (ECE < 0.05).
+
+        这是 spec §3 清场概率的验收机制(校准而非阈值), 必须常驻回归。
+        """
+        from thermal_motion_controller import clearance
+        from thermal_motion_controller.clearance import VIEW_CLEAR
+        rng = np.random.default_rng(42)
+        params = self._params(source_rate_per_m2=0.02)
+        h = w = 20
+        area = 0.25
+        claimed, outcomes = [], []
+        for _ in range(1500):
+            vs = np.zeros((h, w), dtype=np.uint8)
+            sec = np.zeros((h, w), dtype=np.uint8)
+            covered = rng.random((h, w)) < rng.uniform(0.2, 0.95)
+            vs[covered] = VIEW_CLEAR
+            n_sec = rng.integers(1, 5, size=(h, w))
+            sec[covered] = (np.left_shift(1, n_sec) - 1).astype(np.uint8)[covered]
+            p_miss = clearance.cell_miss_prob(vs, sec, params)
+            lam_cells = params.source_rate_per_m2 * area * p_miss
+            n_undet = rng.poisson(lam_cells).sum()
+            claimed.append(clearance.clearance_probability(vs, sec, area, params))
+            outcomes.append(1 if n_undet == 0 else 0)
+        ece = clearance.expected_calibration_error(
+            np.array(claimed), np.array(outcomes), n_bins=10)
+        assert ece < 0.05
 
 
 class TestResidualStrategyWiring:
