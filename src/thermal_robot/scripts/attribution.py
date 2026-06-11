@@ -14,13 +14,22 @@ from typing import Dict, List, Optional, Sequence, Set
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-_wo_spec = importlib.util.spec_from_file_location(
-    'world_occupancy', SCRIPTS_DIR / 'world_occupancy.py')
-world_occupancy = importlib.util.module_from_spec(_wo_spec)
-sys.modules['world_occupancy'] = world_occupancy
-_wo_spec.loader.exec_module(world_occupancy)
+def _load_sibling(name: str):
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS_DIR / f'{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
-FAILURE_CLASSES = ('not_reached', 'occluded', 'timing_missed', 'not_confirmed')
+
+world_occupancy = _load_sibling('world_occupancy')
+_matrix_stats = _load_sibling('matrix_stats')
+
+# 单一来源: matrix_stats 是失败类别的权威定义(报告渲染按它取列)。
+FAILURE_CLASSES = _matrix_stats.FAILURE_CLASSES
 DEFAULT_MIN_VISIBLE_S = 1.0
 TIME_MATCH_TOLERANCE_S = 0.6
 WINDOW_GAP_S = 0.5

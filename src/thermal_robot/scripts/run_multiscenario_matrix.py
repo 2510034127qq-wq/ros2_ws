@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
@@ -148,6 +148,20 @@ def filter_cases(cases: Sequence[MatrixCase], worlds: str, case_names: str) -> L
 
 def occupancy_path_for_world(world: Path) -> Path:
     return OCCUPANCY_DIR / f"{world.stem}.npz"
+
+
+def scenario_fov(scenario_path: Path) -> Tuple[float, float]:
+    """Read the sensor FOV from a scenario YAML; fall back to the 4.0x3.0 default."""
+    try:
+        import yaml
+        with open(scenario_path) as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception:
+        return 4.0, 3.0
+    sensor = raw.get("sensor", {}) or {}
+    fov_x = float(sensor.get("fov_x_m", sensor.get("fov_x", 4.0)))
+    fov_y = float(sensor.get("fov_y_m", sensor.get("fov_y", 3.0)))
+    return fov_x, fov_y
 
 
 def _sourced_command(command: str) -> List[str]:
@@ -315,7 +329,9 @@ def run_case(
         return result
 
     occupancy = occupancy_path_for_world(case.world)
-    attr_cmd = [sys.executable, str(ATTRIBUTION), str(run_dir)]
+    fov_x, fov_y = scenario_fov(case.scenario)
+    attr_cmd = [sys.executable, str(ATTRIBUTION), str(run_dir),
+                "--fov-x", str(fov_x), "--fov-y", str(fov_y)]
     if occupancy.exists():
         attr_cmd += ["--occupancy", str(occupancy)]
     subprocess.run(attr_cmd, cwd=str(WORKSPACE), check=False,

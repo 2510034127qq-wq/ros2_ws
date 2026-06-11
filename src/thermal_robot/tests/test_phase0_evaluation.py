@@ -260,6 +260,17 @@ class TestAttribution(unittest.TestCase):
         self.assertEqual(len(windows), 1)
         self.assertAlmostEqual(windows[0]['duration_s'], 9.9, delta=0.3)
 
+    def test_failure_classes_single_source(self):
+        ms = _load_script('matrix_stats')
+        self.assertEqual(self.attr.FAILURE_CLASSES, ms.FAILURE_CLASSES)
+        result = self.attr.compute_attribution(
+            traj_rows=self._traj(),
+            truth_rows=self._truth('A', 1.5, 0.0),
+            matched_truth_ids=set(),
+            estimate_rows=[],
+            fov_x=4.0, fov_y=3.0, occupancy=None)
+        self.assertEqual(tuple(result['failure_counts'].keys()), ms.FAILURE_CLASSES)
+
 
 class TestScenarioRunSeed(unittest.TestCase):
     def _scenario(self):
@@ -351,6 +362,24 @@ class TestMatrixRunnerConfig(unittest.TestCase):
         boxes_case = next(c for c in cases if c.name.startswith('boxes__'))
         occ = self.runner.occupancy_path_for_world(boxes_case.world)
         self.assertTrue(str(occ).endswith('thermal_scene_obstacle_field.npz'))
+
+    def test_scenario_fov_reads_yaml(self):
+        path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios/dynamic_five_sources.yaml'
+        self.assertEqual(self.runner.scenario_fov(path), (4.0, 3.0))
+
+    def test_scenario_fov_custom_values(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'custom.yaml'
+            path.write_text('sensor:\n  fov_x_m: 6.0\n  fov_y_m: 4.5\n')
+            self.assertEqual(self.runner.scenario_fov(path), (6.0, 4.5))
+
+    def test_scenario_fov_defaults_without_sensor_block(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'plain.yaml'
+            path.write_text('sources: []\n')
+            self.assertEqual(self.runner.scenario_fov(path), (4.0, 3.0))
 
     def test_legacy_presets_still_present(self):
         self.assertGreaterEqual(len(self.runner.REPRESENTATIVE_CASES), 4)
