@@ -393,7 +393,7 @@ def main() -> int:
     parser.add_argument("--worlds", default="", help="phase0 world class filter, e.g. open,boxes")
     parser.add_argument("--cases", default="", help="phase0 case filter, e.g. open__static2")
     parser.add_argument("--seeds", default="101,102,103,104,105", help="comma-separated run seeds")
-    parser.add_argument("--strategy", choices=["full", "frontier", "levy"], default="full")
+    parser.add_argument("--strategy", choices=["full", "frontier", "levy", "residual"], default="full")
     parser.add_argument("--jitter", type=float, default=0.0, help="scenario_jitter_std_m")
     parser.add_argument("--out-root", default="", help="default: /tmp/thermal_matrix_<timestamp>")
     parser.add_argument("--duration", type=float, default=120.0, help="collector duration per run")

@@ -62,6 +62,9 @@ thermal_mapper_node:
     confidence_visit_scale: 6.0
     age_decay_s:       45.0
     unknown_variance: 100.0
+    visibility_enabled: true
+    occupied_threshold: 65
+    visibility_ray_step_m: 0.1
 
 gradient_node:
   ros__parameters:
@@ -206,3 +209,10 @@ controller_node:
     planner_risk_penalty_weight:           0.2
     planner_map_stale_s:                   5.0
     planner_candidate_verify_radius:       3.5
+    clearance_source_rate_per_m2:           0.01
+    clearance_p_detect_per_sector:          0.7
+    clearance_residual_thresh:              1.5
+    clearance_epsilon:                      0.05
+    clearance_eval_interval_s:             10.0
+    clearance_domain_radius_m:             12.0
+    clearance_terminate: false

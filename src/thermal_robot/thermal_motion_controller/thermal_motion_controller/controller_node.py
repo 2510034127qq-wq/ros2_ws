@@ -61,15 +61,21 @@ from rclpy.action import ActionClient
 from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
                         QoSHistoryPolicy, QoSDurabilityPolicy)
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
+from std_msgs.msg import Float32
 from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMap
-from thermal_motion_controller.planning import PlannerWeights
+from thermal_motion_controller.planning import PlannerWeights, select_residual_target
+from thermal_motion_controller import clearance as clearance_mod
 from thermal_motion_controller.target_selection import (
     EXECUTION_DIRECT_FIRST,
+    EXECUTION_NAV2_PREFERRED,
     SourceSeekConfig,
     SourceSeekContext,
+    StrategyTarget,
     SourceSeekTargetSelector,
 )
+from thermal_field_reconstructor import residual as fr_residual
+from thermal_field_reconstructor import visibility as fr_visibility
 
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ExtrapolationException, ConnectivityException
@@ -301,6 +307,13 @@ class ControllerNode(Node):
         self.declare_parameter('levy_post_confirm_step',     10.0)
         self.declare_parameter('random_seed',                 0)
         self.declare_parameter('strategy',                    'full')
+        self.declare_parameter('clearance_source_rate_per_m2', 0.01)
+        self.declare_parameter('clearance_p_detect_per_sector', 0.7)
+        self.declare_parameter('clearance_residual_thresh', 1.5)
+        self.declare_parameter('clearance_epsilon', 0.05)
+        self.declare_parameter('clearance_eval_interval_s', 10.0)
+        self.declare_parameter('clearance_domain_radius_m', 12.0)
+        self.declare_parameter('clearance_terminate', False)
         self.declare_parameter('sample_min_trise',            8.0)
         self.declare_parameter('post_confirm_cooldown_s',   60.0)
         self.declare_parameter('adaptive_thresholds_enabled', True)
@@ -430,9 +443,21 @@ class ControllerNode(Node):
         self._levy_pc_step        = float(g('levy_post_confirm_step').value)
         self._random_seed         = int(g('random_seed').value)
         self._strategy_mode       = str(g('strategy').value or 'full')
-        if self._strategy_mode not in ('full', 'frontier', 'levy'):
+        if self._strategy_mode not in ('full', 'frontier', 'levy', 'residual'):
             self.get_logger().warn(f'unknown strategy={self._strategy_mode}, using full')
             self._strategy_mode = 'full'
+        self._clearance_params = clearance_mod.ClearanceParams(
+            source_rate_per_m2=float(g('clearance_source_rate_per_m2').value),
+            p_detect_per_sector=float(g('clearance_p_detect_per_sector').value),
+            residual_block_thresh=float(g('clearance_residual_thresh').value),
+            epsilon=float(g('clearance_epsilon').value),
+            domain_radius_m=float(g('clearance_domain_radius_m').value),
+        )
+        self._clearance_interval = float(g('clearance_eval_interval_s').value)
+        self._clearance_terminate = bool(g('clearance_terminate').value)
+        self._clearance_last_eval = 0.0
+        self._clearance_value = None
+        self._occ_view = None
         if self._random_seed > 0:
             random.seed(self._random_seed)
             np.random.seed(self._random_seed % (2**31))
@@ -668,6 +693,14 @@ class ControllerNode(Node):
         self.create_subscription(ThermalMap,    '/thermal/map',      self._map_cb,  rel)
         self.create_subscription(SourceEstimateArray, '/thermal/sources', self._sources_cb, rel)
         self.create_subscription(Odometry,      '/odom',             self._odom_cb, be)
+        occ_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(OccupancyGrid, '/map', self._occ_map_cb, occ_qos)
+        self._clearance_pub = self.create_publisher(Float32, '/thermal/clearance', 10)
         self._pub   = self.create_publisher(Twist, '/cmd_vel', 10)
         self._timer = self.create_timer(1.0/self._rate, self._timer_cb)
 
@@ -979,16 +1012,105 @@ class ControllerNode(Node):
                 'resolution': float(msg.resolution),
                 'origin_x': float(msg.origin_x),
                 'origin_y': float(msg.origin_y),
+                'temperature_mean': np.asarray(msg.temperature_mean, dtype=np.float32).reshape(shape),
                 'temperature_variance': np.asarray(msg.temperature_variance, dtype=np.float32).reshape(shape),
                 'confidence': np.asarray(msg.confidence, dtype=np.float32).reshape(shape),
                 'visit_count': np.asarray(msg.visit_count, dtype=np.float32).reshape(shape),
                 'last_seen_age_s': np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape(shape),
             }
+            n_cells = int(msg.width) * int(msg.height)
+            if len(msg.view_state) == n_cells and len(msg.view_sectors) == n_cells:
+                self._thermal_map['view_state'] = np.asarray(
+                    msg.view_state, dtype=np.uint8).reshape(shape)
+                self._thermal_map['view_sectors'] = np.asarray(
+                    msg.view_sectors, dtype=np.uint8).reshape(shape)
             self._thermal_map_t = time.monotonic()
+            if self._strategy_mode == 'residual':
+                now_mono = time.monotonic()
+                if now_mono - self._clearance_last_eval >= self._clearance_interval:
+                    self._clearance_last_eval = now_mono
+                    self._evaluate_clearance()
         except ValueError as exc:
             if not hasattr(self, '_map_shape_warned'):
                 self._map_shape_warned = True
                 self.get_logger().warn(f'[THERMAL_MAP] bad shape: {exc}')
+
+    def _occ_map_cb(self, msg: OccupancyGrid):
+        self._occ_view = fr_visibility.from_flat(
+            msg.data, msg.info.width, msg.info.height,
+            msg.info.origin.position.x + self._spawn_x,
+            msg.info.origin.position.y + self._spawn_y,
+            msg.info.resolution)
+
+    def _residual_snapshot(self):
+        m = self._thermal_map
+        if m is None or 'view_state' not in m or 'temperature_mean' not in m:
+            return None
+        sources = [(sx, sy, max(0.0, st - self._ambient_est), self._heat_sigma)
+                   for sx, sy, st in self._found_sources]
+        predicted = fr_residual.predict_field(
+            m['width'], m['height'], m['resolution'],
+            m['origin_x'], m['origin_y'], self._ambient_est, sources)
+        return fr_residual.residual_field(
+            m['temperature_mean'], predicted, m['view_state'])
+
+    def _residual_waypoint(self):
+        m = self._thermal_map
+        resid = self._residual_snapshot()
+        if m is None or resid is None:
+            return None
+        reach_fn = None
+        if self._occ_view is not None:
+            reach_fn = (lambda x0, y0, x1, y1:
+                        fr_visibility.line_reachable(self._occ_view, x0, y0, x1, y1))
+        target = select_residual_target(
+            self._wx, self._wy,
+            m['width'], m['height'], m['resolution'],
+            m['origin_x'], m['origin_y'],
+            resid, m['view_state'], m['last_seen_age_s'],
+            known_sources=[(sx, sy) for sx, sy, _ in self._found_sources],
+            line_reachable_fn=reach_fn)
+        if target is None:
+            return None
+        return StrategyTarget(
+            x=target.x,
+            y=target.y,
+            score=target.score,
+            reason=target.reason,
+            execution_hint=EXECUTION_NAV2_PREFERRED,
+            metadata={'label': 'residual',
+                      'reachable': getattr(target, 'metadata_reachable', True)},
+        )
+
+    def _evaluate_clearance(self):
+        m = self._thermal_map
+        if m is None or 'view_state' not in m or 'view_sectors' not in m:
+            return
+        resid = self._residual_snapshot()
+        h, w = m['height'], m['width']
+        yy, xx = np.mgrid[0:h, 0:w]
+        cwx = m['origin_x'] + (xx.astype(np.float32) + 0.5) * m['resolution']
+        cwy = m['origin_y'] + (yy.astype(np.float32) + 0.5) * m['resolution']
+        free = (np.hypot(cwx - self._spawn_x, cwy - self._spawn_y)
+                <= self._clearance_params.domain_radius_m)
+        if self._occ_view is not None:
+            free &= ~fr_visibility.occupied_at(self._occ_view, cwx, cwy)
+        t0 = time.monotonic()
+        p_clear = clearance_mod.clearance_probability(
+            m['view_state'], m['view_sectors'], m['resolution'] ** 2,
+            self._clearance_params, residual=resid, free_mask=free)
+        eval_ms = (time.monotonic() - t0) * 1000.0
+        self._clearance_value = p_clear
+        out = Float32()
+        out.data = float(p_clear)
+        self._clearance_pub.publish(out)
+        self.get_logger().info(
+            f'[CLEARANCE] p_no_undetected={p_clear:.4f} '
+            f'eps={self._clearance_params.epsilon} eval_ms={eval_ms:.1f}')
+        if (self._clearance_terminate
+                and p_clear >= 1.0 - self._clearance_params.epsilon
+                and self._found_sources):
+            self.get_logger().info('[CLEARANCE_DONE_SIGNAL] threshold reached')
 
     def _sources_cb(self, msg: SourceEstimateArray):
         now = time.monotonic()
@@ -1326,6 +1448,18 @@ class ControllerNode(Node):
             if force or (now - self._frontier_last_upd) >= self._frontier_upd:
                 self._do_levy_jump(now)
             return
+        if self._strategy_mode == 'residual':
+            if not force and (now - self._frontier_last_upd) < self._frontier_upd:
+                return
+            target = self._residual_waypoint()
+            if target is not None:
+                self._frontier_last_upd = now
+                self._frontier_target = target.xy
+                self.get_logger().info(
+                    f'[FRONTIER/residual/{target.reason}] '
+                    f'→({target.x:.1f},{target.y:.1f}) score={target.score:.3f} '
+                    f'reachable={target.metadata.get("reachable", True)}')
+                return
         if not force and (now-self._frontier_last_upd)<self._frontier_upd:
             return
         self._frontier_last_upd=now
@@ -1522,6 +1656,14 @@ class ControllerNode(Node):
                 self._strategy_context(),
                 step=self._levy_step(),
             )
+        elif self._strategy_mode == 'residual':
+            target = self._residual_waypoint()
+            if target is None:
+                target = self._source_seek_selector.select_coarse_waypoint(
+                    self._strategy_context(),
+                    min_d=self._survey_wp_min_d,
+                    max_d=self._survey_wp_max_d,
+                )
         else:
             target = self._source_seek_selector.select_coarse_waypoint(
                 self._strategy_context(),

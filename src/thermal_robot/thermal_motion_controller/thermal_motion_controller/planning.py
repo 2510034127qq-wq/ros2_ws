@@ -406,3 +406,102 @@ def _norm_clip(values: np.ndarray) -> np.ndarray:
 
 def _wrap_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def select_residual_target(
+    robot_wx: float,
+    robot_wy: float,
+    width: int,
+    height: int,
+    resolution: float,
+    origin_x: float,
+    origin_y: float,
+    residual: np.ndarray,
+    view_state: np.ndarray,
+    last_seen_age_s: np.ndarray,
+    known_sources: Sequence[Tuple[float, float]] = (),
+    min_d: float = 2.5,
+    max_d: float = 16.0,
+    safe_dist: float = 2.3,
+    w_residual: float = 1.6,
+    w_unseen: float = 1.0,
+    w_blocked: float = 1.2,
+    w_age: float = 0.25,
+    w_travel: float = 0.45,
+    w_duplicate: float = 1.2,
+    top_k: int = 12,
+    line_reachable_fn=None,
+) -> Optional[PlannerTarget]:
+    """Select a residual-exploration target with optional straight-line reachability."""
+    if width <= 0 or height <= 0 or resolution <= 0.0:
+        return None
+    resid = _reshape(residual, height, width)
+    vs = np.asarray(view_state).reshape((height, width))
+    age = _reshape(last_seen_age_s, height, width)
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
+    wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
+    dist = np.sqrt((wx - robot_wx) ** 2 + (wy - robot_wy) ** 2)
+    valid = (dist >= min_d) & (dist <= max_d)
+
+    duplicate = np.zeros_like(dist, dtype=np.float32)
+    for sx, sy in known_sources:
+        d = np.sqrt((wx - sx) ** 2 + (wy - sy) ** 2)
+        valid &= d >= safe_dist
+        duplicate = np.maximum(duplicate, np.exp(-0.5 * (d / max(safe_dist, 0.25)) ** 2))
+    if not np.any(valid):
+        return None
+
+    resid_positive = resid[resid > 0.0]
+    if resid_positive.size:
+        resid_scale = float(np.percentile(resid_positive, 95.0))
+        resid_norm = np.clip(resid / max(resid_scale, 1e-6), 0.0, 1.0).astype(np.float32)
+    else:
+        resid_norm = np.zeros_like(resid, dtype=np.float32)
+    unseen = (vs == 0).astype(np.float32)
+    blocked = (vs == 1).astype(np.float32)
+    age_norm = np.where((vs == 2) & (age >= 0.0),
+                        np.clip(age / 60.0, 0.0, 1.0), 0.0).astype(np.float32)
+    travel = np.clip(dist / max(max_d, 1e-3), 0.0, 1.0)
+
+    term_resid = w_residual * resid_norm
+    term_unseen = w_unseen * unseen
+    term_blocked = w_blocked * blocked
+    score = (term_resid + term_unseen + term_blocked + w_age * age_norm
+             - w_travel * travel - w_duplicate * duplicate)
+    score[~valid] = -np.inf
+    if not np.isfinite(score).any():
+        return None
+
+    flat_score = score.reshape(-1)
+    flat_order = np.argsort(flat_score)[::-1][:max(1, int(top_k))]
+
+    def _mk(idx: int, reachable: bool) -> PlannerTarget:
+        iy, ix = np.unravel_index(int(idx), score.shape)
+        terms = {
+            "residual_mass": float(term_resid[iy, ix]),
+            "unseen": float(term_unseen[iy, ix]),
+            "blocked_view": float(term_blocked[iy, ix]),
+        }
+        reason = max(terms, key=terms.get)
+        target = PlannerTarget(
+            x=float(origin_x + (ix + 0.5) * resolution),
+            y=float(origin_y + (iy + 0.5) * resolution),
+            score=float(score[iy, ix]),
+            reason=reason,
+        )
+        target.metadata_reachable = reachable
+        return target
+
+    if line_reachable_fn is None:
+        return _mk(int(flat_order[0]), True)
+    for idx in flat_order:
+        if not np.isfinite(flat_score[int(idx)]):
+            break
+        iy, ix = np.unravel_index(int(idx), score.shape)
+        tx = float(origin_x + (ix + 0.5) * resolution)
+        ty = float(origin_y + (iy + 0.5) * resolution)
+        if line_reachable_fn(robot_wx, robot_wy, tx, ty):
+            return _mk(int(idx), True)
+    return _mk(int(flat_order[0]), False)

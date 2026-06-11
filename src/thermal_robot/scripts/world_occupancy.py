@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import math
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +14,26 @@ from typing import List, Tuple
 
 import numpy as np
 
-GRID_CENTER_X = -6.0
-GRID_CENTER_Y = 0.0
-GRID_SIZE_M = 50.0
+_GRID_GEOMETRY_PATH = (Path(__file__).resolve().parents[1]
+                       / 'thermal_field_reconstructor'
+                       / 'thermal_field_reconstructor' / 'grid_geometry.py')
+
+
+def _load_grid_geometry():
+    name = 'thermal_grid_geometry_shared'
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, _GRID_GEOMETRY_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_gg = _load_grid_geometry()
+GRID_CENTER_X = _gg.GRID_CENTER_X
+GRID_CENTER_Y = _gg.GRID_CENTER_Y
+GRID_SIZE_M = _gg.GRID_SIZE_M
 GRID_RESOLUTION = 0.1
 OBSTACLE_Z_MIN = 0.15
 OBSTACLE_Z_MAX = 1.5

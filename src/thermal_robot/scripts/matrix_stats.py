@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import random
 from collections import Counter
 from itertools import combinations
 from typing import Dict, List, Optional, Sequence
@@ -145,3 +146,58 @@ def render_markdown_report(summary: Dict) -> str:
         lines.append(f'| {name} | {row} |')
     lines.append('')
     return '\n'.join(lines)
+
+
+def paired_permutation_test(xs, ys, n_resamples: int = 20000, seed: int = 0) -> float:
+    """Two-sided paired sign-flip permutation test on mean paired difference."""
+    diffs = [float(x) - float(y) for x, y in zip(xs, ys)]
+    diffs = [d for d in diffs if d != 0.0]
+    n = len(diffs)
+    if n == 0:
+        return 1.0
+    obs = abs(sum(diffs) / n)
+    tol = 1e-12
+    if n <= 14:
+        count = 0
+        total = 1 << n
+        for mask in range(total):
+            s = 0.0
+            for i, d in enumerate(diffs):
+                s += d if (mask >> i) & 1 else -d
+            if abs(s / n) >= obs - tol:
+                count += 1
+        return count / total
+    rng = random.Random(seed)
+    count = 0
+    for _ in range(int(n_resamples)):
+        s = sum(d if rng.random() < 0.5 else -d for d in diffs)
+        if abs(s / n) >= obs - tol:
+            count += 1
+    return (count + 1) / (int(n_resamples) + 1)
+
+
+def cluster_bootstrap_ratio_ci(numerators, denominators, n_boot: int = 10000,
+                               seed: int = 0, alpha: float = 0.05):
+    """Run-level cluster bootstrap CI for an event-pooled ratio."""
+    nums = [float(v) for v in numerators]
+    dens = [float(v) for v in denominators]
+    n = len(nums)
+    total_den = sum(dens)
+    point = (sum(nums) / total_den) if total_den > 0 else 0.0
+    if n == 0:
+        return point, 0.0, 1.0
+    if all(v == point for v in nums) and all(d == 1.0 for d in dens):
+        return point, point, point
+    rng = random.Random(seed)
+    stats = []
+    for _ in range(int(n_boot)):
+        num = den = 0.0
+        for _k in range(n):
+            i = rng.randrange(n)
+            num += nums[i]
+            den += dens[i]
+        stats.append(num / den if den > 0 else point)
+    stats.sort()
+    lo = stats[max(0, int(math.floor((alpha / 2.0) * (n_boot - 1))))]
+    hi = stats[min(n_boot - 1, int(math.ceil((1.0 - alpha / 2.0) * (n_boot - 1))))]
+    return point, lo, hi

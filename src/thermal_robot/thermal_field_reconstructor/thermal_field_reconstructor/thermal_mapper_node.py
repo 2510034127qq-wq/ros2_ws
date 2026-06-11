@@ -6,13 +6,15 @@ import time
 
 import numpy as np
 import rclpy
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
 from thermal_interfaces.msg import ThermalMap
 from tf2_ros import Buffer, ConnectivityException, ExtrapolationException, LookupException, TransformListener
 
+from thermal_field_reconstructor import visibility
+from thermal_field_reconstructor.observation import SensorPose2D, TopDownRectProjector
 from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
 
 
@@ -33,6 +35,9 @@ class ThermalMapperNode(Node):
         self.declare_parameter('confidence_visit_scale', 6.0)
         self.declare_parameter('age_decay_s', 45.0)
         self.declare_parameter('unknown_variance', 100.0)
+        self.declare_parameter('visibility_enabled', True)
+        self.declare_parameter('occupied_threshold', 65)
+        self.declare_parameter('visibility_ray_step_m', 0.1)
 
         g = self.get_parameter
         self._publish_rate = float(g('publish_rate').value)
@@ -42,6 +47,12 @@ class ThermalMapperNode(Node):
         self._spawn_y = float(g('spawn_y').value)
         self._fov_x = float(g('sensor_fov_x').value)
         self._fov_y = float(g('sensor_fov_y').value)
+        self._visibility_enabled = bool(g('visibility_enabled').value)
+        self._occupied_threshold = int(g('occupied_threshold').value)
+        self._ray_step = float(g('visibility_ray_step_m').value)
+        self._projector = TopDownRectProjector(fov_x=self._fov_x, fov_y=self._fov_y)
+        self._occ_view = None
+        self._fuse_count = 0
         self._grid = WorldThermalGrid(
             center_x=self._spawn_x,
             center_y=self._spawn_y,
@@ -80,6 +91,13 @@ class ThermalMapperNode(Node):
         )
         self.create_subscription(Image, '/thermal/filtered', self._image_cb, be)
         self.create_subscription(Odometry, '/odom', self._odom_cb, be)
+        map_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(OccupancyGrid, '/map', self._slam_map_cb, map_qos)
         self._pub = self.create_publisher(ThermalMap, '/thermal/map', rel)
         self.get_logger().info(
             f'thermal_mapper_node | grid={self._grid.width}x{self._grid.height} '
@@ -97,6 +115,14 @@ class ThermalMapperNode(Node):
         if not self._tf_ready:
             self._wx = self._spawn_x + self._odom_x
             self._wy = self._spawn_y + self._odom_y
+
+    def _slam_map_cb(self, msg: OccupancyGrid):
+        self._occ_view = visibility.from_flat(
+            msg.data, msg.info.width, msg.info.height,
+            msg.info.origin.position.x + self._spawn_x,
+            msg.info.origin.position.y + self._spawn_y,
+            msg.info.resolution,
+            occupied_threshold=self._occupied_threshold)
 
     def _update_pose(self):
         if self._pose_source == 'odom':
@@ -129,7 +155,20 @@ class ThermalMapperNode(Node):
         arr = np.frombuffer(bytes(msg.data[:n * 4]), np.float32).reshape(msg.height, msg.width).copy()
         self._update_pose()
         now_s = time.monotonic() - self._t0
-        self._grid.integrate_image(arr, self._wx, self._wy, self._yaw, now_s, self._fov_x, self._fov_y)
+        pose = SensorPose2D(x=self._wx, y=self._wy, yaw=self._yaw)
+        obs = self._projector.project(arr, pose, now_s)
+        occ = self._occ_view if self._visibility_enabled else None
+        t0 = time.monotonic()
+        self._grid.integrate_observation(obs, occupancy=occ, ray_step_m=self._ray_step)
+        fuse_ms = (time.monotonic() - t0) * 1000.0
+        self._fuse_count += 1
+        if self._fuse_count % 100 == 0:
+            blocked_total = int((self._grid.blocked_count > 0).sum())
+            clear_total = int((self._grid.visit_count > 0).sum())
+            self.get_logger().info(
+                f'[FUSE] n={self._fuse_count} {fuse_ms:.1f}ms '
+                f'occ_map={"yes" if occ is not None else "no"} '
+                f'cells_clear={clear_total} cells_blocked_only={blocked_total}')
         if now_s - self._last_pub_s >= 1.0 / max(self._publish_rate, 0.1):
             self._last_pub_s = now_s
             self._publish_map(msg.header, now_s)
@@ -149,6 +188,8 @@ class ThermalMapperNode(Node):
         msg.confidence = snap.confidence.reshape(-1).astype(np.float32).tolist()
         msg.visit_count = snap.visit_count.reshape(-1).astype(np.uint32).tolist()
         msg.last_seen_age_s = snap.last_seen_age_s.reshape(-1).astype(np.float32).tolist()
+        msg.view_state = snap.view_state.reshape(-1).astype(np.uint8).tolist()
+        msg.view_sectors = snap.view_sectors.reshape(-1).astype(np.uint8).tolist()
         self._pub.publish(msg)
 
 

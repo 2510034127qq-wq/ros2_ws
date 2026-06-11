@@ -55,6 +55,7 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path as NavPath
 from sensor_msgs.msg import Image, LaserScan
+from std_msgs.msg import Float32
 from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalField, ThermalMap
 
 # TF2
@@ -117,6 +118,7 @@ class DataCollector(Node):
         self._cmdvel:      list = []   # 速度指令
         self._scan_stats:  list = []   # 激光扫描统计 [v3]
         self._plan_stats:  list = []   # Nav2规划路径统计 [v3]
+        self._clearance_rows: list = []
         self._snap_count   = 0
         self._last_snap    = 0.0
         self._last_scan_rec = 0.0
@@ -143,6 +145,7 @@ class DataCollector(Node):
             '/cmd_vel':           [],
             '/scan':              [],   # [v3]
             '/plan':              [],   # [v3]
+            '/thermal/clearance':  [],
         }
 
         # 最新帧缓存
@@ -172,13 +175,14 @@ class DataCollector(Node):
         # [v3] 新增订阅
         self.create_subscription(LaserScan,    '/scan',             self._scan_cb,   BE_QOS)
         self.create_subscription(NavPath,      '/plan',             self._plan_cb,   RE_QOS)
+        self.create_subscription(Float32,      '/thermal/clearance', self._clearance_cb, RE_QOS)
 
         # [v3] 定时查询 TF（10Hz，与 controller_node 同频）
         if TF2_AVAILABLE:
             self.create_timer(0.1, self._tf_poll_cb)
 
         self.get_logger().info(
-            f'[collector v3] 已订阅 12 个话题（含 /scan, /plan, map/sources/truth），输出→ {out_dir}')
+            f'[collector v3] 已订阅 13 个话题（含 /scan, /plan, map/sources/truth/clearance），输出→ {out_dir}')
         self.get_logger().info('[collector v3] Ctrl+C 停止并保存数据')
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -421,6 +425,11 @@ class DataCollector(Node):
             'ang_z': float(msg.angular.z),
         })
 
+    def _clearance_cb(self, msg: Float32):
+        t = self._ts()
+        self._record_rate('/thermal/clearance', t)
+        self._clearance_rows.append({'t': t, 'p_clear': float(msg.data)})
+
     def _scan_cb(self, msg: LaserScan):
         """[v3] 激光扫描统计（按间隔记录，避免大量数据）。"""
         t = self._ts()
@@ -616,6 +625,7 @@ class DataCollector(Node):
         write_csv('thermal_sources_truth.csv', self._truth)
         write_csv('source_events.csv', self._source_events)
         write_csv('cmd_vel.csv',         self._cmdvel)
+        write_csv('clearance.csv',       self._clearance_rows)
         write_csv('scan_stats.csv',      self._scan_stats)  # [v3]
         write_csv('nav2_plan_stats.csv', self._plan_stats)  # [v3]
 
@@ -645,6 +655,8 @@ class DataCollector(Node):
             'slam_pos_count':    self._slam_pos_count,
             'nav2_available':    self._nav2_available,
             'nav2_plan_count':   self._nav2_plan_count,
+            'clearance_final': (
+                self._clearance_rows[-1]['p_clear'] if self._clearance_rows else None),
             'topic_rates':       rate_summary,
             'counts': {
                 'trajectory':    len(self._traj),
@@ -657,6 +669,7 @@ class DataCollector(Node):
                 'truth_sources':  len(self._truth),
                 'source_events':  len(self._source_events),
                 'cmd_vel':       len(self._cmdvel),
+                'clearance':     len(self._clearance_rows),
                 'scan_stats':    len(self._scan_stats),
                 'nav2_plans':    len(self._plan_stats),
             },

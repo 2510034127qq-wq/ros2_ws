@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
+
+from thermal_field_reconstructor import visibility as _visibility
+from thermal_field_reconstructor.grid_geometry import (
+    GRID_CENTER_X, GRID_CENTER_Y, GRID_SIZE_M)
+from thermal_field_reconstructor.observation import (  # noqa: F401
+    SensorPose2D, ThermalObservation, TopDownRectProjector,
+    project_pixels_to_world)
+
+VIEW_NEVER = 0
+VIEW_BLOCKED_ONLY = 1
+VIEW_CLEAR = 2
+N_VIEW_SECTORS = 8
 
 
 @dataclass
@@ -21,26 +32,8 @@ class GridSnapshot:
     confidence: np.ndarray
     visit_count: np.ndarray
     last_seen_age_s: np.ndarray
-
-
-def project_pixels_to_world(
-    width: int,
-    height: int,
-    fov_x: float,
-    fov_y: float,
-    robot_wx: float,
-    robot_wy: float,
-    robot_yaw: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Project a rectified thermal image footprint into world coordinates."""
-    px_xs = np.linspace(-fov_x / 2.0, fov_x / 2.0, width, dtype=np.float32)
-    px_ys = np.linspace(-fov_y / 2.0, fov_y / 2.0, height, dtype=np.float32)
-    px_xx, px_yy = np.meshgrid(px_xs, px_ys)
-    cos_y = math.cos(robot_yaw)
-    sin_y = math.sin(robot_yaw)
-    world_xs = robot_wx + cos_y * px_xx - sin_y * px_yy
-    world_ys = robot_wy + sin_y * px_xx + cos_y * px_yy
-    return world_xs, world_ys
+    view_state: np.ndarray
+    view_sectors: np.ndarray
 
 
 class WorldThermalGrid:
@@ -48,10 +41,10 @@ class WorldThermalGrid:
 
     def __init__(
         self,
-        center_x: float = -6.0,
-        center_y: float = 0.0,
-        size_x_m: float = 50.0,
-        size_y_m: float = 50.0,
+        center_x: float = GRID_CENTER_X,
+        center_y: float = GRID_CENTER_Y,
+        size_x_m: float = GRID_SIZE_M,
+        size_y_m: float = GRID_SIZE_M,
         resolution: float = 0.25,
         ambient_temp: float = 22.0,
         confidence_visit_scale: float = 6.0,
@@ -72,6 +65,8 @@ class WorldThermalGrid:
         self.confidence_visit_scale = max(1.0, float(confidence_visit_scale))
         self.age_decay_s = max(1e-3, float(age_decay_s))
         self.unknown_variance = float(unknown_variance)
+        self.blocked_count = np.zeros(shape, dtype=np.uint32)
+        self.view_sectors = np.zeros(shape, dtype=np.uint8)
 
     def world_to_cell(self, wx: np.ndarray, wy: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         ix = np.floor((wx - self.origin_x) / self.resolution).astype(np.int32)
@@ -84,23 +79,13 @@ class WorldThermalGrid:
         wy = self.origin_y + (iy.astype(np.float32) + 0.5) * self.resolution
         return wx, wy
 
-    def integrate_image(
-        self,
-        image: np.ndarray,
-        robot_wx: float,
-        robot_wy: float,
-        robot_yaw: float,
-        stamp_s: float,
-        fov_x: float = 4.0,
-        fov_y: float = 3.0,
-    ) -> None:
-        world_xs, world_ys = project_pixels_to_world(
-            image.shape[1], image.shape[0], fov_x, fov_y, robot_wx, robot_wy, robot_yaw
-        )
-        ix, iy, valid = self.world_to_cell(world_xs.reshape(-1), world_ys.reshape(-1))
+    def integrate_observation(self, obs, occupancy=None,
+                              ray_step_m=_visibility.DEFAULT_RAY_STEP_M) -> None:
+        """Fuse contract observations, integrating only cells visible in occupancy."""
+        ix, iy, valid = self.world_to_cell(obs.sample_wx, obs.sample_wy)
         if not np.any(valid):
             return
-        values = image.reshape(-1).astype(np.float32)[valid]
+        values = np.asarray(obs.temperature, dtype=np.float32)[valid]
         linear = iy[valid] * self.width + ix[valid]
         total_cells = self.width * self.height
         obs_count = np.bincount(linear, minlength=total_cells).astype(np.float32)
@@ -110,23 +95,66 @@ class WorldThermalGrid:
         if cells.size == 0:
             return
 
-        obs_n = obs_count[cells]
-        obs_mean = obs_sum[cells] / obs_n
-        obs_m2 = np.maximum(0.0, obs_sum_sq[cells] - obs_n * obs_mean * obs_mean)
+        cell_ix = (cells % self.width).astype(np.int32)
+        cell_iy = (cells // self.width).astype(np.int32)
+        cwx, cwy = self.cell_to_world(cell_ix, cell_iy)
+        if occupancy is not None:
+            visible = _visibility.visible_mask(
+                occupancy, obs.sensor_pose.x, obs.sensor_pose.y,
+                cwx, cwy, step_m=ray_step_m)
+        else:
+            visible = np.ones(cells.size, dtype=bool)
+
+        blocked_cells = cells[~visible]
+        if blocked_cells.size:
+            blocked_flat = self.blocked_count.reshape(-1)
+            blocked_flat[blocked_cells] += 1
+
+        clear = cells[visible]
+        if clear.size == 0:
+            return
+        obs_n = obs_count[clear]
+        obs_mean = obs_sum[clear] / obs_n
+        obs_m2 = np.maximum(0.0, obs_sum_sq[clear] - obs_n * obs_mean * obs_mean)
 
         mean_flat = self.mean.reshape(-1)
         m2_flat = self._m2.reshape(-1)
         visit_flat = self.visit_count.reshape(-1)
         last_flat = self.last_seen.reshape(-1)
 
-        prev_n = visit_flat[cells].astype(np.float32)
-        prev_mean = mean_flat[cells]
+        prev_n = visit_flat[clear].astype(np.float32)
+        prev_mean = mean_flat[clear]
         new_n = prev_n + obs_n
         delta = obs_mean - prev_mean
-        mean_flat[cells] = prev_mean + delta * obs_n / np.maximum(new_n, 1.0)
-        m2_flat[cells] = m2_flat[cells] + obs_m2 + delta * delta * prev_n * obs_n / np.maximum(new_n, 1.0)
-        visit_flat[cells] = np.clip(new_n, 0, np.iinfo(np.uint32).max).astype(np.uint32)
-        last_flat[cells] = float(stamp_s)
+        mean_flat[clear] = prev_mean + delta * obs_n / np.maximum(new_n, 1.0)
+        m2_flat[clear] = m2_flat[clear] + obs_m2 + delta * delta * prev_n * obs_n / np.maximum(new_n, 1.0)
+        visit_flat[clear] = np.clip(new_n, 0, np.iinfo(np.uint32).max).astype(np.uint32)
+        last_flat[clear] = float(obs.stamp_s)
+
+        sector_flat = self.view_sectors.reshape(-1)
+        az = np.arctan2(obs.sensor_pose.y - cwy[visible],
+                        obs.sensor_pose.x - cwx[visible])
+        sector = (((az + np.pi) / (2.0 * np.pi)) * N_VIEW_SECTORS).astype(np.int32)
+        sector = np.clip(sector, 0, N_VIEW_SECTORS - 1)
+        sector_flat[clear] |= (1 << sector).astype(np.uint8)
+
+    def integrate_image(
+        self,
+        image: np.ndarray,
+        robot_wx: float,
+        robot_wy: float,
+        robot_yaw: float,
+        stamp_s: float,
+        fov_x: float = 4.0,
+        fov_y: float = 3.0,
+        occupancy=None,
+    ) -> None:
+        projector = TopDownRectProjector(fov_x=fov_x, fov_y=fov_y)
+        obs = projector.project(
+            np.asarray(image, dtype=np.float32),
+            SensorPose2D(x=float(robot_wx), y=float(robot_wy), yaw=float(robot_yaw)),
+            float(stamp_s))
+        self.integrate_observation(obs, occupancy=occupancy)
 
     def snapshot(self, now_s: float) -> GridSnapshot:
         count_f = self.visit_count.astype(np.float32)
@@ -139,6 +167,9 @@ class WorldThermalGrid:
         confidence = np.zeros_like(self.mean, dtype=np.float32)
         confidence[visited] = np.minimum(1.0, count_f[visited] / self.confidence_visit_scale)
         confidence[visited] *= np.exp(-age[visited] / self.age_decay_s).astype(np.float32)
+        view_state = np.zeros_like(self.mean, dtype=np.uint8)
+        view_state[self.blocked_count > 0] = VIEW_BLOCKED_ONLY
+        view_state[self.visit_count > 0] = VIEW_CLEAR
         return GridSnapshot(
             width=self.width,
             height=self.height,
@@ -150,4 +181,6 @@ class WorldThermalGrid:
             confidence=confidence,
             visit_count=self.visit_count.copy(),
             last_seen_age_s=age,
+            view_state=view_state,
+            view_sectors=self.view_sectors.copy(),
         )
