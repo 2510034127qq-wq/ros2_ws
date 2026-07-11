@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import importlib.util
 import json
+import math
 import os
 import shlex
 import signal
@@ -15,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
@@ -28,6 +31,28 @@ CONFIG_B = BRINGUP / "config/config_b_sources.yaml"
 COLLECTOR = SCRIPTS / "collect_sim_data.py"
 ATTRIBUTION = SCRIPTS / "attribution.py"
 HEALTH_CHECK = SCRIPTS / "nav2_health_check.py"
+
+RUN_FINGERPRINT_VERSION = "phase1-matrix-v1"
+REQUIRED_PIPELINE_COUNTS = (
+    "trajectory",
+    "thermal_stats",
+    "field_stats",
+    "map_stats",
+    "grad_stats",
+    "truth_sources",
+    "cmd_vel",
+    "scan_stats",
+)
+COUNT_CSV_ARTIFACTS = {
+    "trajectory": "trajectory.csv",
+    "thermal_stats": "thermal_stats.csv",
+    "field_stats": "field_stats.csv",
+    "map_stats": "thermal_map_stats.csv",
+    "grad_stats": "gradient_stats.csv",
+    "truth_sources": "thermal_sources_truth.csv",
+    "cmd_vel": "cmd_vel.csv",
+    "scan_stats": "scan_stats.csv",
+}
 
 
 def _load_matrix_stats():
@@ -181,6 +206,15 @@ def _ensure_files(cases: Sequence[MatrixCase]) -> None:
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError("Missing required files:\n  " + "\n  ".join(missing))
+    mismatches = runtime_sync_mismatches(runtime_sync_pairs())
+    if mismatches:
+        shown = "\n  ".join(
+            f"{source} != {installed}" for source, installed in mismatches[:8])
+        more = (f"\n  ... and {len(mismatches) - 8} more"
+                if len(mismatches) > 8 else "")
+        raise RuntimeError(
+            "Installed ROS runtime is missing or stale. Rebuild the workspace "
+            "before collecting a matrix:\n  " + shown + more)
 
 
 def _stop_process_group(proc: subprocess.Popen, grace_s: float = 10.0) -> None:
@@ -208,6 +242,359 @@ def _load_json(path: Path) -> Dict:
         return {}
     with open(path, "r") as f:
         return json.load(f)
+
+
+def _csv_data_row_count(path: Path) -> Optional[int]:
+    try:
+        with open(path, newline="") as stream:
+            reader = csv.DictReader(stream)
+            if not reader.fieldnames:
+                return None
+            return sum(1 for _ in reader)
+    except (OSError, csv.Error, UnicodeDecodeError):
+        return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def runtime_sync_pairs() -> List[Tuple[Path, Path]]:
+    """Map active source files to the installed files launched by ROS 2."""
+    pairs: List[Tuple[Path, Path]] = []
+    for package in (
+            "thermal_sensor_sim", "signal_preprocessor",
+            "thermal_field_reconstructor", "thermal_gradient_processor",
+            "thermal_motion_controller"):
+        source_root = WORKSPACE / "src/thermal_robot" / package / package
+        install_candidates = sorted(
+            (WORKSPACE / "install" / package / "lib").glob(
+                f"python*/site-packages/{package}"))
+        install_root = (install_candidates[0] if install_candidates else
+                        WORKSPACE / "install" / package / "lib" /
+                        f"python{sys.version_info.major}.{sys.version_info.minor}" /
+                        "site-packages" / package)
+        for source in sorted(source_root.rglob("*.py")):
+            pairs.append((source, install_root / source.relative_to(source_root)))
+
+    data_roots = (
+        (WORKSPACE / "src/thermal_robot/thermal_bringup/config",
+         WORKSPACE / "install/thermal_bringup/share/thermal_bringup/config"),
+        (WORKSPACE / "src/thermal_robot/thermal_bringup/launch",
+         WORKSPACE / "install/thermal_bringup/share/thermal_bringup/launch"),
+        (WORKSPACE / "src/thermal_robot/g1_description/urdf",
+         WORKSPACE / "install/g1_description/share/g1_description/urdf"),
+    )
+    runtime_data_suffixes = {".py", ".yaml", ".xml", ".urdf", ".xacro"}
+    for source_root, install_root in data_roots:
+        for source in sorted(
+                path for path in source_root.rglob("*")
+                if path.is_file() and path.suffix in runtime_data_suffixes):
+            pairs.append((source, install_root / source.relative_to(source_root)))
+    return pairs
+
+
+def runtime_sync_mismatches(
+        pairs: Sequence[Tuple[Path, Path]]) -> List[Tuple[Path, Path]]:
+    """Return source/install pairs whose content is missing or different."""
+    mismatches = []
+    for source, installed in pairs:
+        if (not source.is_file() or not installed.is_file()
+                or _sha256_file(source) != _sha256_file(installed)):
+            mismatches.append((source, installed))
+    return mismatches
+
+
+def _runtime_fingerprint_paths() -> List[Path]:
+    """Return files that define matrix collection and installed runtime behavior."""
+    paths = set()
+    source_roots = [
+        WORKSPACE / "src/thermal_robot/thermal_sensor_sim",
+        WORKSPACE / "src/thermal_robot/signal_preprocessor",
+        WORKSPACE / "src/thermal_robot/thermal_field_reconstructor",
+        WORKSPACE / "src/thermal_robot/thermal_gradient_processor",
+        WORKSPACE / "src/thermal_robot/thermal_motion_controller",
+        WORKSPACE / "src/thermal_robot/thermal_bringup/config",
+        WORKSPACE / "src/thermal_robot/thermal_bringup/launch",
+        WORKSPACE / "src/thermal_robot/thermal_bringup/worlds",
+        WORKSPACE / "src/thermal_robot/g1_description/urdf",
+    ]
+    allowed_suffixes = {".py", ".yaml", ".world", ".urdf", ".xml", ".npz"}
+    for root in source_roots:
+        if root.exists():
+            paths.update(
+                path for path in root.rglob("*")
+                if path.is_file() and path.suffix in allowed_suffixes
+                and "__pycache__" not in path.parts
+            )
+    for script in (
+            Path(__file__).resolve(), COLLECTOR, ATTRIBUTION,
+            SCRIPTS / "matrix_stats.py", SCRIPTS / "world_occupancy.py"):
+        if script.exists():
+            paths.add(script)
+
+    install_roots = [
+        WORKSPACE / "install/thermal_sensor_sim",
+        WORKSPACE / "install/signal_preprocessor",
+        WORKSPACE / "install/thermal_field_reconstructor",
+        WORKSPACE / "install/thermal_gradient_processor",
+        WORKSPACE / "install/thermal_motion_controller",
+        WORKSPACE / "install/thermal_bringup/share/thermal_bringup/config",
+        WORKSPACE / "install/thermal_bringup/share/thermal_bringup/launch",
+        WORKSPACE / "install/g1_description/share/g1_description/urdf",
+    ]
+    for root in install_roots:
+        if root.exists():
+            paths.update(
+                path for path in root.rglob("*")
+                if path.is_file() and path.suffix in allowed_suffixes
+                and "__pycache__" not in path.parts
+            )
+    return sorted(paths, key=lambda path: str(path.resolve()))
+
+
+def runtime_bundle_fingerprint() -> str:
+    """Hash source, installed runtime, configs, worlds, and collection code."""
+    digest = hashlib.sha256()
+    digest.update((RUN_FINGERPRINT_VERSION + "\n").encode())
+    for path in _runtime_fingerprint_paths():
+        try:
+            label = str(path.resolve().relative_to(WORKSPACE.resolve()))
+        except ValueError:
+            label = str(path.resolve())
+        digest.update(label.encode())
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def require_unchanged_runtime(expected: str, actual: str) -> None:
+    """Abort rather than mix runs produced by different runtime bundles."""
+    if actual != expected:
+        raise RuntimeError(
+            "runtime bundle changed during matrix collection; stop editing/building, "
+            "then rerun the same command with --resume")
+
+
+def build_run_fingerprint(
+    case: MatrixCase,
+    seed: int,
+    strategy: str,
+    duration_s: float,
+    warmup_s: float,
+    jitter_std_m: float,
+    min_recall: float,
+    health_only: bool,
+    runtime_fingerprint: Optional[str] = None,
+) -> str:
+    """Hash all invocation and runtime inputs that make a checkpoint reusable."""
+    occupancy = occupancy_path_for_world(case.world)
+    payload = {
+        "version": RUN_FINGERPRINT_VERSION,
+        "case": {
+            "name": case.name,
+            "world": str(case.world.resolve()),
+            "world_sha256": _sha256_file(case.world),
+            "scenario": str(case.scenario.resolve()),
+            "scenario_sha256": _sha256_file(case.scenario),
+            "occupancy": str(occupancy.resolve()) if occupancy.exists() else None,
+            "occupancy_sha256": _sha256_file(occupancy) if occupancy.exists() else None,
+        },
+        "invocation": {
+            "seed": int(seed),
+            "strategy": str(strategy),
+            "duration_s": float(duration_s),
+            "warmup_s": float(warmup_s),
+            "jitter_std_m": float(jitter_std_m),
+            "min_recall": float(min_recall),
+            "health_only": bool(health_only),
+        },
+        "runtime_bundle_sha256": (
+            runtime_fingerprint
+            if runtime_fingerprint is not None
+            else runtime_bundle_fingerprint()),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_run_result(run_dir: Path, result: Dict) -> None:
+    """Atomically checkpoint one completed run for safe matrix resume."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "run_result.json"
+    tmp_path = run_dir / "run_result.json.tmp"
+    tmp_path.write_text(json.dumps(result, indent=2) + "\n")
+    tmp_path.replace(path)
+
+
+def prepare_run_attempt(
+    run_dir: Path,
+    resume: bool,
+    expected_fingerprint: str,
+) -> Optional[Path]:
+    """Protect existing evidence before starting a new run attempt.
+
+    An incompatible completed checkpoint is never overwritten.  A partial
+    directory from an interrupted attempt is moved intact under
+    ``.incomplete/`` so stale CSV files cannot leak into the next attribution
+    pass and no evidence is deleted.
+    """
+    run_dir = Path(run_dir)
+    if not run_dir.exists() or not any(run_dir.iterdir()):
+        return None
+    if not resume:
+        raise FileExistsError(
+            f"run directory already contains data: {run_dir}; use a new "
+            "--out-root or rerun the identical command with --resume")
+
+    checkpoint_path = run_dir / "run_result.json"
+    if checkpoint_path.exists():
+        try:
+            checkpoint = _load_json(checkpoint_path)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            checkpoint = {}
+        found_fingerprint = checkpoint.get("run_fingerprint")
+        if found_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                f"incompatible checkpoint in {run_dir}: expected "
+                f"{expected_fingerprint}, found {found_fingerprint!r}; "
+                "use a new --out-root so different experiments cannot mix")
+
+    out_root = run_dir.parents[1]
+    archive_parent = out_root / ".incomplete" / run_dir.parent.name
+    archive_parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    archived = archive_parent / f"{run_dir.name}-{timestamp}"
+    run_dir.rename(archived)
+    return archived
+
+
+def load_resumable_result(
+    run_dir: Path,
+    case: MatrixCase,
+    seed: int,
+    strategy: str,
+    expected_fingerprint: str,
+) -> Optional[Dict]:
+    """Load a complete, provenance-matching checkpoint or return None."""
+    path = Path(run_dir) / "run_result.json"
+    try:
+        result = _load_json(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not result:
+        return None
+    if result.get("name") != case.name:
+        return None
+    if int(result.get("seed", -1)) != int(seed):
+        return None
+    if result.get("strategy") != strategy:
+        return None
+    if result.get("run_fingerprint") != expected_fingerprint:
+        return None
+    required = ("collector_returncode", "passed", "missing_counts", "counts")
+    if any(key not in result for key in required):
+        return None
+    if result.get("collector_returncode") != 0:
+        return None
+    if result.get("missing_counts") != []:
+        return None
+    counts = result.get("counts")
+    if not isinstance(counts, dict):
+        return None
+    required_counts = list(REQUIRED_PIPELINE_COUNTS)
+    if strategy == "residual":
+        required_counts.append("clearance")
+    try:
+        result_count_values = {
+            key: int(counts.get(key, 0) or 0) for key in required_counts}
+    except (TypeError, ValueError):
+        return None
+    if any(value <= 0 for value in result_count_values.values()):
+        return None
+    required_artifacts = [
+        "metadata.json",
+        "source_summary.json",
+        "attribution.json",
+        "launch.log",
+    ]
+    required_artifacts.extend(COUNT_CSV_ARTIFACTS.values())
+    if strategy == "residual":
+        required_artifacts.append("clearance.csv")
+    if any(not (Path(run_dir) / filename).exists()
+           for filename in required_artifacts):
+        return None
+    try:
+        metadata = _load_json(Path(run_dir) / "metadata.json")
+        source_summary = _load_json(Path(run_dir) / "source_summary.json")
+        attribution = _load_json(Path(run_dir) / "attribution.json")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    metadata_counts = metadata.get("counts") if isinstance(metadata, dict) else None
+    if not isinstance(metadata_counts, dict):
+        return None
+    try:
+        metadata_count_values = {
+            key: int(metadata_counts.get(key, 0) or 0) for key in required_counts}
+    except (TypeError, ValueError):
+        return None
+    if any(value <= 0 for value in metadata_count_values.values()):
+        return None
+    if metadata_count_values != result_count_values:
+        return None
+    for count_key, filename in COUNT_CSV_ARTIFACTS.items():
+        if _csv_data_row_count(Path(run_dir) / filename) != result_count_values[count_key]:
+            return None
+    summary_keys = {
+        "source_recall", "source_precision", "truth_count", "matched_count",
+        "confirmed_count", "duplicate_confirmations",
+    }
+    if not isinstance(source_summary, dict) or not summary_keys.issubset(source_summary):
+        return None
+    if (not isinstance(attribution, dict)
+            or not isinstance(attribution.get("failure_counts"), dict)):
+        return None
+    for key in summary_keys:
+        if key not in result:
+            continue
+        artifact_value = source_summary.get(key)
+        result_value = result.get(key)
+        if isinstance(artifact_value, (int, float)) and isinstance(
+                result_value, (int, float)):
+            if not math.isclose(
+                    float(artifact_value), float(result_value),
+                    rel_tol=0.0, abs_tol=1e-12):
+                return None
+        elif artifact_value != result_value:
+            return None
+    if ("failure_counts" in result
+            and attribution.get("failure_counts") != result.get("failure_counts")):
+        return None
+    if ("truth_count" in result and "n_truth_sources" in attribution
+            and int(attribution["n_truth_sources"]) != int(result["truth_count"])):
+        return None
+    if ("matched_count" in result and "n_matched" in attribution
+            and int(attribution["n_matched"]) != int(result["matched_count"])):
+        return None
+    localization_errors = source_summary.get("localization_errors_m")
+    if ("matched_count" in result and localization_errors is not None
+            and (not isinstance(localization_errors, list)
+                 or len(localization_errors) != int(result["matched_count"]))):
+        return None
+    if (Path(run_dir) / "launch.log").stat().st_size <= 0:
+        return None
+    if strategy == "residual":
+        if (_csv_data_row_count(Path(run_dir) / "clearance.csv")
+                != result_count_values["clearance"]):
+            return None
+    return result
 
 
 def run_case(
@@ -341,7 +728,9 @@ def run_case(
     summary = _load_json(run_dir / "source_summary.json")
     attribution = _load_json(run_dir / "attribution.json")
     counts = metadata.get("counts", {})
-    required_counts = ["thermal_stats", "field_stats", "map_stats", "grad_stats", "truth_sources", "cmd_vel"]
+    required_counts = list(REQUIRED_PIPELINE_COUNTS)
+    if strategy == "residual":
+        required_counts.append("clearance")
     missing_counts = [key for key in required_counts if int(counts.get(key, 0) or 0) <= 0]
     recall = float(summary.get("source_recall", 0.0) or 0.0)
     duplicates = int(summary.get("duplicate_confirmations", 0) or 0)
@@ -401,6 +790,9 @@ def main() -> int:
     parser.add_argument("--domain-start", type=int, default=71)
     parser.add_argument("--min-recall", type=float, default=0.0)
     parser.add_argument("--health-only", action="store_true", help="run Nav2 health check instead of collecting data")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="reuse provenance-matching, artifact-complete run_result.json checkpoints")
     args = parser.parse_args()
 
     matrix_stats = _load_matrix_stats()
@@ -418,17 +810,49 @@ def main() -> int:
     if args.domain_start > 232:
         raise ValueError("ROS_DOMAIN_ID must stay <= 232; lower --domain-start")
     domain_span = max(1, 233 - args.domain_start)
+    runtime_fingerprint = runtime_bundle_fingerprint()
 
     runs: List[Dict] = []
     run_idx = 0
     for case in cases:
         for seed in seeds:
             run_idx += 1
+            require_unchanged_runtime(
+                runtime_fingerprint, runtime_bundle_fingerprint())
             domain_id = args.domain_start + ((run_idx - 1) % domain_span)
+            run_dir = out_root / case.name / f"seed{seed}"
+            run_fingerprint = build_run_fingerprint(
+                case=case,
+                seed=seed,
+                strategy=args.strategy,
+                duration_s=args.duration,
+                warmup_s=args.warmup,
+                jitter_std_m=args.jitter,
+                min_recall=args.min_recall,
+                health_only=args.health_only,
+                runtime_fingerprint=runtime_fingerprint,
+            )
+            if args.resume and not args.health_only:
+                cached = load_resumable_result(
+                    run_dir, case, seed=seed, strategy=args.strategy,
+                    expected_fingerprint=run_fingerprint)
+                if cached is not None:
+                    runs.append(cached)
+                    print(
+                        f"[matrix] resume {run_idx}/{n_runs}: {case.name} "
+                        f"seed={seed} strategy={args.strategy}")
+                    continue
+            archived = prepare_run_attempt(
+                run_dir,
+                resume=bool(args.resume and not args.health_only),
+                expected_fingerprint=run_fingerprint,
+            )
+            if archived is not None:
+                print(f"[matrix] archived incomplete attempt: {archived}")
             print(f"[matrix] run {run_idx}/{n_runs}: {case.name} seed={seed} strategy={args.strategy}")
             result = run_case(
                 case=case,
-                run_dir=out_root / case.name / f"seed{seed}",
+                run_dir=run_dir,
                 duration_s=args.duration,
                 warmup_s=args.warmup,
                 domain_id=domain_id,
@@ -438,6 +862,11 @@ def main() -> int:
                 jitter_std_m=args.jitter,
                 health_only=args.health_only,
             )
+            require_unchanged_runtime(
+                runtime_fingerprint, runtime_bundle_fingerprint())
+            result["run_fingerprint"] = run_fingerprint
+            if not args.health_only:
+                write_run_result(run_dir, result)
             runs.append(result)
             status = "PASS" if result.get("passed") else "FAIL"
             if args.health_only:
@@ -468,7 +897,11 @@ def main() -> int:
             "duration_s": args.duration,
             "warmup_s": args.warmup,
             "jitter_std_m": args.jitter,
+            "min_recall": args.min_recall,
             "health_only": args.health_only,
+            "resume": args.resume,
+            "run_fingerprint_version": RUN_FINGERPRINT_VERSION,
+            "runtime_bundle_sha256": runtime_fingerprint,
         },
         "n_runs": len(runs),
         "n_passed": sum(1 for item in runs if item.get("passed")),

@@ -199,6 +199,10 @@ controller_node:
     nav2_progress_timeout_s:          4.0
     nav2_progress_min_delta:          0.35
     nav2_stall_direct_s:             16.0
+    nav2_goal_min_interval_s:         3.0
+    direct_scan_stop_m:               0.65
+    direct_scan_stale_s:              0.6
+    direct_scan_half_angle_deg:      60.0
 
     # ── World-map information-gain planner ─────────────────────────────────
     planner_information_gain_weight:       1.0
@@ -209,6 +213,10 @@ controller_node:
     planner_risk_penalty_weight:           0.2
     planner_map_stale_s:                   5.0
     planner_candidate_verify_radius:       3.5
+    residual_planner_min_evidence:          1.5
+    residual_planner_footprint_radius:      2.0
+    residual_planner_top_k:                  64
+    residual_waypoint_min_d:                 3.0
     clearance_source_rate_per_m2:           0.01
     clearance_p_detect_per_sector:          0.7
     clearance_residual_thresh:              1.5

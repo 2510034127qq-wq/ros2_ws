@@ -2,6 +2,7 @@
 """Phase 0 evaluation foundation unit tests with no ROS runtime dependency."""
 
 import importlib.util
+import json
 import math
 import sys
 import unittest
@@ -384,6 +385,303 @@ class TestMatrixRunnerConfig(unittest.TestCase):
     def test_legacy_presets_still_present(self):
         self.assertGreaterEqual(len(self.runner.REPRESENTATIVE_CASES), 4)
         self.assertGreaterEqual(len(self.runner.VARIABLE_SOURCE_CASES), 3)
+        self.assertIn('scan_stats', self.runner.REQUIRED_PIPELINE_COUNTS)
+        self.assertIn('trajectory', self.runner.REQUIRED_PIPELINE_COUNTS)
+
+    @staticmethod
+    def _complete_counts():
+        return {
+            'trajectory': 10,
+            'thermal_stats': 10,
+            'field_stats': 10,
+            'map_stats': 10,
+            'grad_stats': 10,
+            'truth_sources': 10,
+            'cmd_vel': 10,
+            'scan_stats': 10,
+            'clearance': 2,
+        }
+
+    def _write_complete_artifacts(self, run_dir):
+        counts = self._complete_counts()
+        count_artifacts = {
+            'trajectory': 'trajectory.csv',
+            'thermal_stats': 'thermal_stats.csv',
+            'field_stats': 'field_stats.csv',
+            'map_stats': 'thermal_map_stats.csv',
+            'grad_stats': 'gradient_stats.csv',
+            'truth_sources': 'thermal_sources_truth.csv',
+            'cmd_vel': 'cmd_vel.csv',
+            'scan_stats': 'scan_stats.csv',
+        }
+        for key, filename in count_artifacts.items():
+            rows = ''.join(f'{index},{index}\n' for index in range(counts[key]))
+            (run_dir / filename).write_text('t,value\n' + rows)
+        (run_dir / 'metadata.json').write_text(json.dumps({'counts': counts}) + '\n')
+        (run_dir / 'source_summary.json').write_text(json.dumps({
+            'source_recall': 0.5,
+            'source_precision': 1.0,
+            'truth_count': 2,
+            'matched_count': 1,
+            'confirmed_count': 1,
+            'duplicate_confirmations': 0,
+        }) + '\n')
+        (run_dir / 'attribution.json').write_text(json.dumps({
+            'failure_counts': {'not_reached': 1},
+        }) + '\n')
+        (run_dir / 'launch.log').write_text('[controller] started\n')
+        clearance_rows = ''.join(
+            f'{index},{0.8 - index * 0.1}\n'
+            for index in range(counts['clearance']))
+        (run_dir / 'clearance.csv').write_text('t,p_clear\n' + clearance_rows)
+
+    def _fingerprint(self, case, **overrides):
+        values = {
+            'seed': 101,
+            'strategy': 'residual',
+            'duration_s': 120.0,
+            'warmup_s': 36.0,
+            'jitter_std_m': 0.0,
+            'min_recall': 0.0,
+            'health_only': False,
+            'runtime_fingerprint': 'runtime-a',
+        }
+        values.update(overrides)
+        return self.runner.build_run_fingerprint(case=case, **values)
+
+    def test_run_fingerprint_covers_invocation_and_runtime(self):
+        case = self.runner.phase0_cases()[0]
+        base = self._fingerprint(case)
+        self.assertEqual(base, self._fingerprint(case))
+        for key, value in (
+                ('seed', 102),
+                ('strategy', 'full'),
+                ('duration_s', 121.0),
+                ('warmup_s', 35.0),
+                ('jitter_std_m', 0.1),
+                ('min_recall', 0.5),
+                ('runtime_fingerprint', 'runtime-b')):
+            self.assertNotEqual(base, self._fingerprint(case, **{key: value}))
+
+    def test_matrix_rejects_runtime_change_during_collection(self):
+        self.runner.require_unchanged_runtime('runtime-a', 'runtime-a')
+        with self.assertRaisesRegex(RuntimeError, 'runtime bundle changed'):
+            self.runner.require_unchanged_runtime('runtime-a', 'runtime-b')
+
+    def test_runtime_sync_check_rejects_stale_install_copy(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'source.py'
+            installed = Path(td) / 'installed.py'
+            source.write_text('value = 1\n')
+            installed.write_text('value = 1\n')
+            self.assertEqual(
+                self.runner.runtime_sync_mismatches([(source, installed)]), [])
+            installed.write_text('value = 0\n')
+            self.assertEqual(
+                self.runner.runtime_sync_mismatches([(source, installed)]),
+                [(source, installed)])
+
+    def test_run_attempt_refuses_incompatible_checkpoint(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / 'case' / 'seed101'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'run_result.json').write_text(json.dumps({
+                'run_fingerprint': 'runtime-a',
+            }))
+            with self.assertRaisesRegex(RuntimeError, 'incompatible checkpoint'):
+                self.runner.prepare_run_attempt(
+                    run_dir, resume=True, expected_fingerprint='runtime-b')
+            self.assertTrue(run_dir.exists())
+
+    def test_run_attempt_archives_partial_directory_before_retry(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / 'case' / 'seed101'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'partial.csv').write_text('old\n')
+            archived = self.runner.prepare_run_attempt(
+                run_dir, resume=True, expected_fingerprint='runtime-a')
+            self.assertFalse(run_dir.exists())
+            self.assertIsNotNone(archived)
+            self.assertEqual((archived / 'partial.csv').read_text(), 'old\n')
+            self.assertIn('.incomplete', archived.parts)
+
+    def test_run_attempt_refuses_nonempty_directory_without_resume(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / 'case' / 'seed101'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'partial.csv').write_text('old\n')
+            with self.assertRaisesRegex(FileExistsError, '--resume'):
+                self.runner.prepare_run_attempt(
+                    run_dir, resume=False, expected_fingerprint='runtime-a')
+
+    def test_resume_result_requires_matching_completed_run(self):
+        import tempfile
+
+        case = self.runner.phase0_cases()[0]
+        fingerprint = self._fingerprint(case)
+        result = {
+            'name': case.name,
+            'seed': 101,
+            'strategy': 'residual',
+            'run_fingerprint': fingerprint,
+            'collector_returncode': 0,
+            'passed': True,
+            'missing_counts': [],
+            'counts': self._complete_counts(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / case.name / 'seed101'
+            run_dir.mkdir(parents=True)
+            self._write_complete_artifacts(run_dir)
+            self.runner.write_run_result(run_dir, result)
+            loaded = self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint)
+            self.assertEqual(loaded, result)
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='full',
+                expected_fingerprint=fingerprint))
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint='different-runtime'))
+            cached = json.loads((run_dir / 'run_result.json').read_text())
+            cached.pop('collector_returncode')
+            (run_dir / 'run_result.json').write_text(json.dumps(cached))
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+    def test_resume_rejects_checkpoint_with_missing_artifact(self):
+        import tempfile
+
+        case = self.runner.phase0_cases()[0]
+        fingerprint = self._fingerprint(case)
+        result = {
+            'name': case.name, 'seed': 101, 'strategy': 'residual',
+            'run_fingerprint': fingerprint,
+            'collector_returncode': 0, 'passed': True,
+            'missing_counts': [], 'counts': self._complete_counts(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / case.name / 'seed101'
+            run_dir.mkdir(parents=True)
+            self._write_complete_artifacts(run_dir)
+            (run_dir / 'clearance.csv').unlink()
+            self.runner.write_run_result(run_dir, result)
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+    def test_resume_rejects_missing_or_truncated_raw_csv(self):
+        import tempfile
+
+        case = self.runner.phase0_cases()[0]
+        fingerprint = self._fingerprint(case)
+        result = {
+            'name': case.name, 'seed': 101, 'strategy': 'residual',
+            'run_fingerprint': fingerprint,
+            'collector_returncode': 0, 'passed': True,
+            'missing_counts': [], 'counts': self._complete_counts(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / case.name / 'seed101'
+            run_dir.mkdir(parents=True)
+            self._write_complete_artifacts(run_dir)
+            self.runner.write_run_result(run_dir, result)
+            (run_dir / 'scan_stats.csv').unlink()
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+    def test_resume_rejects_summary_and_attribution_mismatch(self):
+        import tempfile
+
+        case = self.runner.phase0_cases()[0]
+        fingerprint = self._fingerprint(case)
+        result = {
+            'name': case.name, 'seed': 101, 'strategy': 'residual',
+            'run_fingerprint': fingerprint,
+            'collector_returncode': 0, 'passed': True,
+            'missing_counts': [], 'counts': self._complete_counts(),
+            'source_recall': 0.5, 'source_precision': 1.0,
+            'truth_count': 2, 'matched_count': 1, 'confirmed_count': 1,
+            'duplicate_confirmations': 0,
+            'failure_counts': {'not_reached': 1},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / case.name / 'seed101'
+            run_dir.mkdir(parents=True)
+            self._write_complete_artifacts(run_dir)
+            self.runner.write_run_result(run_dir, result)
+
+            source_summary = json.loads((run_dir / 'source_summary.json').read_text())
+            source_summary['source_recall'] = 1.0
+            (run_dir / 'source_summary.json').write_text(json.dumps(source_summary))
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+            self._write_complete_artifacts(run_dir)
+            (run_dir / 'attribution.json').write_text(json.dumps({
+                'failure_counts': {'not_reached': 0},
+            }))
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+            self._write_complete_artifacts(run_dir)
+            (run_dir / 'thermal_stats.csv').write_text('t,value\n0,0\n')
+            self.assertIsNone(self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint))
+
+    def test_resume_rejects_failed_collection_missing_counts_and_bad_artifacts(self):
+        import tempfile
+
+        case = self.runner.phase0_cases()[0]
+        fingerprint = self._fingerprint(case)
+        result = {
+            'name': case.name, 'seed': 101, 'strategy': 'residual',
+            'run_fingerprint': fingerprint,
+            'collector_returncode': 1, 'passed': False,
+            'missing_counts': [], 'counts': self._complete_counts(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / case.name / 'seed101'
+            run_dir.mkdir(parents=True)
+            self._write_complete_artifacts(run_dir)
+            self.runner.write_run_result(run_dir, result)
+            load = lambda: self.runner.load_resumable_result(
+                run_dir, case, seed=101, strategy='residual',
+                expected_fingerprint=fingerprint)
+            self.assertIsNone(load())
+
+            result['collector_returncode'] = 0
+            result['missing_counts'] = ['cmd_vel']
+            self.runner.write_run_result(run_dir, result)
+            self.assertIsNone(load())
+
+            result['missing_counts'] = []
+            self.runner.write_run_result(run_dir, result)
+            (run_dir / 'attribution.json').write_text('{broken')
+            self.assertIsNone(load())
+
+            self._write_complete_artifacts(run_dir)
+            (run_dir / 'clearance.csv').write_text('t,p_clear\n')
+            self.assertIsNone(load())
+
+            self._write_complete_artifacts(run_dir)
+            result['counts']['cmd_vel'] = 'corrupt'
+            self.runner.write_run_result(run_dir, result)
+            self.assertIsNone(load())
 
 
 if __name__ == '__main__':

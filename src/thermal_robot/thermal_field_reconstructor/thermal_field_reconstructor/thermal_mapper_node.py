@@ -117,6 +117,14 @@ class ThermalMapperNode(Node):
             self._wy = self._spawn_y + self._odom_y
 
     def _slam_map_cb(self, msg: OccupancyGrid):
+        if not visibility.occupancy_grid_has_known_cells(
+                msg.data, msg.info.width, msg.info.height):
+            if not getattr(self, '_empty_occ_warned', False):
+                self._empty_occ_warned = True
+                self.get_logger().warn(
+                    f'[OCC_MAP_SKIP] unusable size={msg.info.width}x{msg.info.height} '
+                    f'data={len(msg.data)} known=0; retaining previous valid map')
+            return
         self._occ_view = visibility.from_flat(
             msg.data, msg.info.width, msg.info.height,
             msg.info.origin.position.x + self._spawn_x,

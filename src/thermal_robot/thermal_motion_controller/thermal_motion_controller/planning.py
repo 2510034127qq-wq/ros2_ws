@@ -43,6 +43,25 @@ class PlannerSector:
     reason: str
 
 
+def operational_waypoint_min_distance(
+    configured_min_d: float,
+    arrival_radius: float,
+    resolution: float,
+    configured_margin: float = 0.5,
+) -> float:
+    """Return a planner minimum that cannot be born inside arrival tolerance.
+
+    A target selected at or inside the controller's arrival radius is consumed
+    on the next control tick without producing translational motion.  Two grid
+    cells of margin also absorb target quantization and small pose jitter.
+    """
+    configured_min = max(0.0, float(configured_min_d))
+    arrival = max(0.0, float(arrival_radius))
+    quantization_margin = 2.0 * max(0.0, float(resolution))
+    margin = max(0.0, float(configured_margin), quantization_margin)
+    return max(configured_min, arrival + margin)
+
+
 def select_information_gain_target(
     robot_wx: float,
     robot_wy: float,
@@ -404,6 +423,30 @@ def _norm_clip(values: np.ndarray) -> np.ndarray:
     return np.clip(finite / p95, 0.0, 1.0).astype(np.float32)
 
 
+def _box_mean(values: np.ndarray, radius_cells: int) -> np.ndarray:
+    """Fast clipped-window mean for footprint-level planning terms."""
+    arr = np.asarray(values, dtype=np.float32)
+    if radius_cells <= 0:
+        return arr.copy()
+    height, width = arr.shape
+    integral = np.pad(arr, ((1, 0), (1, 0)), mode="constant")
+    integral = np.cumsum(np.cumsum(integral, axis=0), axis=1)
+    ys = np.arange(height)
+    xs = np.arange(width)
+    y0 = np.maximum(0, ys - radius_cells)
+    y1 = np.minimum(height, ys + radius_cells + 1)
+    x0 = np.maximum(0, xs - radius_cells)
+    x1 = np.minimum(width, xs + radius_cells + 1)
+    sums = (
+        integral[y1[:, None], x1[None, :]]
+        - integral[y0[:, None], x1[None, :]]
+        - integral[y1[:, None], x0[None, :]]
+        + integral[y0[:, None], x0[None, :]]
+    )
+    counts = ((y1 - y0)[:, None] * (x1 - x0)[None, :]).astype(np.float32)
+    return (sums / np.maximum(counts, 1.0)).astype(np.float32)
+
+
 def _wrap_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -429,10 +472,13 @@ def select_residual_target(
     w_age: float = 0.25,
     w_travel: float = 0.45,
     w_duplicate: float = 1.2,
-    top_k: int = 12,
+    residual_floor: float = 1.5,
+    footprint_radius: float = 2.0,
+    top_k: int = 64,
+    candidate_valid_mask=None,
     line_reachable_fn=None,
 ) -> Optional[PlannerTarget]:
-    """Select a residual-exploration target with optional straight-line reachability."""
+    """Select a footprint-level target with strict optional reachability."""
     if width <= 0 or height <= 0 or resolution <= 0.0:
         return None
     resid = _reshape(residual, height, width)
@@ -444,6 +490,10 @@ def select_residual_target(
     wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
     dist = np.sqrt((wx - robot_wx) ** 2 + (wy - robot_wy) ** 2)
     valid = (dist >= min_d) & (dist <= max_d)
+    if candidate_valid_mask is not None:
+        endpoint_mask = np.asarray(candidate_valid_mask, dtype=bool).reshape(
+            (height, width))
+        valid &= endpoint_mask
 
     duplicate = np.zeros_like(dist, dtype=np.float32)
     for sx, sy in known_sources:
@@ -453,10 +503,12 @@ def select_residual_target(
     if not np.any(valid):
         return None
 
-    resid_positive = resid[resid > 0.0]
+    resid_evidence = np.where(resid >= max(0.0, float(residual_floor)), resid, 0.0)
+    resid_positive = resid_evidence[resid_evidence > 0.0]
     if resid_positive.size:
         resid_scale = float(np.percentile(resid_positive, 95.0))
-        resid_norm = np.clip(resid / max(resid_scale, 1e-6), 0.0, 1.0).astype(np.float32)
+        resid_norm = np.clip(
+            resid_evidence / max(resid_scale, 1e-6), 0.0, 1.0).astype(np.float32)
     else:
         resid_norm = np.zeros_like(resid, dtype=np.float32)
     unseen = (vs == 0).astype(np.float32)
@@ -465,17 +517,39 @@ def select_residual_target(
                         np.clip(age / 60.0, 0.0, 1.0), 0.0).astype(np.float32)
     travel = np.clip(dist / max(max_d, 1e-3), 0.0, 1.0)
 
-    term_resid = w_residual * resid_norm
-    term_unseen = w_unseen * unseen
-    term_blocked = w_blocked * blocked
-    score = (term_resid + term_unseen + term_blocked + w_age * age_norm
+    radius_cells = max(0, int(math.ceil(float(footprint_radius) / resolution)))
+    footprint_resid = _box_mean(resid_norm, radius_cells)
+    footprint_unseen = _box_mean(unseen, radius_cells)
+    footprint_blocked = _box_mean(blocked, radius_cells)
+    footprint_age = _box_mean(age_norm, radius_cells)
+    term_resid = w_residual * (0.35 * resid_norm + 0.65 * footprint_resid)
+    term_unseen = w_unseen * footprint_unseen
+    term_blocked = w_blocked * footprint_blocked
+    score = (term_resid + term_unseen + term_blocked + w_age * footprint_age
              - w_travel * travel - w_duplicate * duplicate)
     score[~valid] = -np.inf
     if not np.isfinite(score).any():
         return None
 
     flat_score = score.reshape(-1)
-    flat_order = np.argsort(flat_score)[::-1][:max(1, int(top_k))]
+    flat_order = np.argsort(flat_score)[::-1]
+    candidate_indices = []
+    candidate_cells = []
+    min_separation_cells = max(1, radius_cells)
+    for idx in flat_order:
+        idx = int(idx)
+        if not np.isfinite(flat_score[idx]):
+            break
+        iy, ix = np.unravel_index(idx, score.shape)
+        if any(math.hypot(ix - px, iy - py) < min_separation_cells
+               for py, px in candidate_cells):
+            continue
+        candidate_indices.append(idx)
+        candidate_cells.append((iy, ix))
+        if len(candidate_indices) >= max(1, int(top_k)):
+            break
+    if not candidate_indices:
+        return None
 
     def _mk(idx: int, reachable: bool) -> PlannerTarget:
         iy, ix = np.unravel_index(int(idx), score.shape)
@@ -495,13 +569,11 @@ def select_residual_target(
         return target
 
     if line_reachable_fn is None:
-        return _mk(int(flat_order[0]), True)
-    for idx in flat_order:
-        if not np.isfinite(flat_score[int(idx)]):
-            break
+        return _mk(candidate_indices[0], True)
+    for idx in candidate_indices:
         iy, ix = np.unravel_index(int(idx), score.shape)
         tx = float(origin_x + (ix + 0.5) * resolution)
         ty = float(origin_y + (iy + 0.5) * resolution)
         if line_reachable_fn(robot_wx, robot_wy, tx, ty):
             return _mk(int(idx), True)
-    return _mk(int(flat_order[0]), False)
+    return None

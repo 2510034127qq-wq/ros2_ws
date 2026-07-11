@@ -104,6 +104,15 @@ class TestObservationContract:
 
 
 class TestVisibility:
+    def test_occupancy_grid_shape_validation(self):
+        from thermal_field_reconstructor import visibility
+
+        assert visibility.valid_occupancy_grid_shape([0] * 12, 4, 3)
+        assert not visibility.valid_occupancy_grid_shape([], 0, 0)
+        assert not visibility.valid_occupancy_grid_shape([0] * 11, 4, 3)
+        assert visibility.occupancy_grid_has_known_cells([0, -1], 2, 1)
+        assert not visibility.occupancy_grid_has_known_cells([-1, -1], 2, 1)
+
     def test_empty_map_all_visible_and_wall_blocks(self):
         from thermal_field_reconstructor import visibility
         occ = _make_occ()
@@ -142,6 +151,61 @@ class TestVisibility:
         visibility.visible_mask(occ, 0.0, 0.0,
                                 2.5 * np.cos(ang), 2.5 * np.sin(ang), step_m=0.1)
         assert (_t.monotonic() - t0) < 0.05
+
+    def test_strict_reachability_rejects_unknown_and_occupied_endpoint(self):
+        from thermal_field_reconstructor import visibility
+
+        occ = _make_occ(width=40, height=40, origin_x=-5.0, origin_y=-5.0)
+        occ.data[:, :] = -1
+        occ.data[18:23, 18:27] = 0
+        assert visibility.line_reachable_known_free(occ, 0.0, 0.0, 1.0, 0.0)
+        assert not visibility.line_reachable_known_free(occ, 0.0, 0.0, 3.0, 0.0)
+        occ.data[20, 24] = 100
+        assert not visibility.line_reachable_known_free(occ, 0.0, 0.0, 1.0, 0.0)
+
+    def test_plannable_reachability_allows_unknown_path_but_requires_free_endpoint(self):
+        from thermal_field_reconstructor import visibility
+
+        occ = _make_occ(width=40, height=40, origin_x=-5.0, origin_y=-5.0)
+        occ.data[:, :] = -1
+        occ.data[20, 20] = 0
+        occ.data[20, 24] = 0
+        assert visibility.line_reachable_plannable(occ, 0.0, 0.0, 1.0, 0.0)
+        assert not visibility.line_reachable_known_free(occ, 0.0, 0.0, 1.0, 0.0)
+        occ.data[20, 24] = 100
+        assert not visibility.line_reachable_plannable(occ, 0.0, 0.0, 1.0, 0.0)
+
+    def test_reachability_cannot_skip_single_slam_cell(self):
+        from thermal_field_reconstructor import visibility
+
+        occ = visibility.OccupancyView(
+            origin_x=0.0,
+            origin_y=0.0,
+            resolution=0.05,
+            data=np.zeros((4, 24), dtype=np.int16),
+        )
+        y = 0.075
+        x0, x1 = 0.025, 1.025
+        occ.data[1, 10] = 100
+        assert not visibility.line_reachable(occ, x0, y, x1, y)
+        assert not visibility.line_reachable_plannable(occ, x0, y, x1, y)
+
+        occ.data[1, 10] = -1
+        assert visibility.line_reachable_plannable(occ, x0, y, x1, y)
+        assert not visibility.line_reachable_known_free(occ, x0, y, x1, y)
+
+    def test_corner_crossing_is_conservative_for_strict_motion(self):
+        from thermal_field_reconstructor import visibility
+
+        occ = visibility.OccupancyView(
+            origin_x=0.0,
+            origin_y=0.0,
+            resolution=0.05,
+            data=np.zeros((8, 8), dtype=np.int16),
+        )
+        occ.data[1, 2] = 100
+        assert not visibility.line_reachable_known_free(
+            occ, 0.075, 0.075, 0.275, 0.275)
 
 
 class TestThreeStateFusion:
@@ -253,6 +317,271 @@ class TestResidualTarget:
         assert t2 is not None
         assert hasattr(t2, "metadata_reachable")
 
+    def test_cold_noise_cannot_outscore_unseen_coverage(self):
+        from thermal_motion_controller.planning import select_residual_target
+        from thermal_field_reconstructor.thermal_mapping import VIEW_CLEAR, VIEW_NEVER
+
+        args = self._args()
+        args["view_state"][:, :] = VIEW_CLEAR
+        args["last_seen_age_s"][:, :] = 1.0
+        args["residual"][28:33, 48:53] = 0.05
+        args["view_state"][18:42, 2:18] = VIEW_NEVER
+        target = select_residual_target(
+            **args, residual_floor=1.5, footprint_radius=2.0)
+        assert target is not None
+        assert target.reason == "unseen"
+        assert target.x < 0.0
+
+    def test_footprint_gain_prefers_region_over_isolated_unseen_cell(self):
+        from thermal_motion_controller.planning import select_residual_target
+        from thermal_field_reconstructor.thermal_mapping import VIEW_CLEAR, VIEW_NEVER
+
+        args = self._args()
+        args["view_state"][:, :] = VIEW_CLEAR
+        args["last_seen_age_s"][:, :] = 1.0
+        args["view_state"][30, 43] = VIEW_NEVER
+        args["view_state"][15:31, 3:19] = VIEW_NEVER
+        target = select_residual_target(**args, footprint_radius=2.0)
+        assert target is not None
+        assert target.x < 0.0
+        assert target.reason == "unseen"
+
+    def test_unreachable_candidates_return_none(self):
+        from thermal_motion_controller.planning import select_residual_target
+
+        args = self._args(line_reachable_fn=lambda *_args: False)
+        target = select_residual_target(**args, top_k=32)
+        assert target is None
+
+    def test_candidate_mask_filters_unknown_or_occupied_endpoints_before_ranking(self):
+        from thermal_motion_controller.planning import select_residual_target
+
+        args = self._args()
+        candidate_mask = np.zeros((args["height"], args["width"]), dtype=bool)
+        candidate_mask[20:40, 30:45] = True
+        target = select_residual_target(**args, candidate_valid_mask=candidate_mask)
+        assert target is not None
+        iy = int((target.y - args["origin_y"]) / args["resolution"])
+        ix = int((target.x - args["origin_x"]) / args["resolution"])
+        assert candidate_mask[iy, ix]
+
+    def test_full_grid_planning_speed_budget(self):
+        import time as _time
+        from thermal_motion_controller.planning import select_residual_target
+
+        h = w = 200
+        start = _time.monotonic()
+        target = select_residual_target(
+            robot_wx=0.0, robot_wy=0.0,
+            width=w, height=h, resolution=0.25,
+            origin_x=-25.0, origin_y=-25.0,
+            residual=np.zeros((h, w), dtype=np.float32),
+            view_state=np.zeros((h, w), dtype=np.uint8),
+            last_seen_age_s=np.full((h, w), -1.0, dtype=np.float32),
+            min_d=5.0, max_d=14.0, top_k=64,
+            line_reachable_fn=lambda *_args: True,
+        )
+        elapsed_ms = (_time.monotonic() - start) * 1000.0
+        assert target is not None
+        assert elapsed_ms < 100.0
+
+
+class TestWaypointDistanceContract:
+    def test_operational_minimum_exceeds_arrival_radius(self):
+        from thermal_motion_controller.planning import operational_waypoint_min_distance
+
+        assert operational_waypoint_min_distance(
+            configured_min_d=2.5,
+            arrival_radius=2.5,
+            resolution=0.25,
+        ) == pytest.approx(3.0)
+
+    def test_configured_minimum_remains_authoritative_when_safe(self):
+        from thermal_motion_controller.planning import operational_waypoint_min_distance
+
+        assert operational_waypoint_min_distance(
+            configured_min_d=5.0,
+            arrival_radius=2.5,
+            resolution=0.25,
+        ) == pytest.approx(5.0)
+
+    def test_grid_resolution_sets_a_strict_quantization_margin(self):
+        from thermal_motion_controller.planning import operational_waypoint_min_distance
+
+        assert operational_waypoint_min_distance(
+            configured_min_d=2.6,
+            arrival_radius=2.5,
+            resolution=1.0,
+        ) == pytest.approx(4.5)
+
+    def test_controller_wires_operational_bounds_into_residual_planner(self):
+        controller = (ROBOT / "thermal_motion_controller" / "thermal_motion_controller"
+                      / "controller_node.py").read_text()
+        assert "operational_waypoint_min_distance" in controller
+        assert "configured_min_d=self._residual_waypoint_min_d" in controller
+        assert "min_d=effective_min_d" in controller
+        assert "max_d=self._survey_wp_max_d" in controller
+        assert "RESIDUAL_TARGET_REJECT/too_close" in controller
+        assert "line_reachable_plannable" in controller
+        assert "candidate_valid_mask=candidate_valid_mask" in controller
+        assert "residual_floor=self._residual_planner_min_evidence" in controller
+        assert "footprint_radius=self._residual_planner_footprint_radius" in controller
+        assert "top_k=self._residual_planner_top_k" in controller
+        assert "[RESIDUAL_PLAN]" in controller
+
+    def test_residual_planner_parameters_live_in_yaml(self):
+        import yaml
+
+        params_path = ROBOT / "thermal_bringup" / "config" / "params.yaml"
+        params = yaml.safe_load(params_path.read_text())["controller_node"]["ros__parameters"]
+        assert params["residual_planner_min_evidence"] > 0.0
+        assert params["residual_planner_footprint_radius"] > 0.0
+        assert params["residual_planner_top_k"] >= 16
+        assert params["residual_waypoint_min_d"] >= 3.0
+
+
+class TestNav2GoalLifecycle:
+    def test_goal_decision_rate_limits_every_state(self):
+        from thermal_motion_controller.navigation_policy import (
+            GOAL_KEEP, GOAL_REPLACE, GOAL_SEND, GOAL_WAIT, decide_goal_action)
+
+        current = (1.0, 1.0)
+        assert decide_goal_action(
+            "active", current, current, now=2.0, last_send_t=1.0,
+            min_interval_s=3.0) == GOAL_KEEP
+        assert decide_goal_action(
+            "active", current, (5.0, 1.0), now=2.0, last_send_t=1.0,
+            min_interval_s=3.0) == GOAL_WAIT
+        assert decide_goal_action(
+            "active", current, (5.0, 1.0), now=4.1, last_send_t=1.0,
+            min_interval_s=3.0) == GOAL_REPLACE
+        assert decide_goal_action(
+            "idle", None, (5.0, 1.0), now=2.0, last_send_t=1.0,
+            min_interval_s=3.0) == GOAL_WAIT
+        assert decide_goal_action(
+            "idle", None, (5.0, 1.0), now=4.1, last_send_t=1.0,
+            min_interval_s=3.0) == GOAL_SEND
+
+    def test_controller_invalidates_stale_goal_callbacks(self):
+        controller = (ROBOT / "thermal_motion_controller" / "thermal_motion_controller"
+                      / "controller_node.py").read_text()
+        assert "decide_goal_action" in controller
+        assert "_nav2_goal_generation" in controller
+        assert "generation != self._nav2_goal_generation" in controller
+        assert "[NAV2_STALE_CANCEL]" in controller
+        assert "nav2_goal_min_interval_s" in controller
+
+    def test_nav2_goal_interval_lives_in_yaml(self):
+        import yaml
+
+        params_path = ROBOT / "thermal_bringup" / "config" / "params.yaml"
+        params = yaml.safe_load(params_path.read_text())["controller_node"]["ros__parameters"]
+        assert params["nav2_goal_min_interval_s"] >= 3.0
+
+
+class TestDirectMotionGuard:
+    def test_forward_clearance_uses_only_forward_cone_and_open_range(self):
+        from thermal_motion_controller.navigation_policy import forward_clearance
+
+        ranges = [0.20, 4.0, float("inf"), 3.0, 0.25]
+        clearance = forward_clearance(
+            ranges,
+            angle_min=-math.pi,
+            angle_increment=math.pi / 2.0,
+            range_min=0.10,
+            range_max=12.0,
+            half_angle_rad=math.radians(20.0),
+        )
+        assert clearance == pytest.approx(12.0)
+
+    def test_forward_clearance_rejects_invalid_or_missing_forward_samples(self):
+        from thermal_motion_controller.navigation_policy import forward_clearance
+
+        assert forward_clearance(
+            [float("nan"), 0.01, float("nan")],
+            angle_min=-0.2,
+            angle_increment=0.2,
+            range_min=0.10,
+            range_max=12.0,
+            half_angle_rad=0.3,
+        ) is None
+        assert forward_clearance(
+            [2.0, 3.0],
+            angle_min=1.0,
+            angle_increment=0.2,
+            range_min=0.10,
+            range_max=12.0,
+            half_angle_rad=0.3,
+        ) is None
+
+    def test_direct_motion_requires_fresh_clear_scan(self):
+        from thermal_motion_controller.navigation_policy import (
+            DIRECT_KNOWN_FREE,
+            DIRECT_SCAN_GUARDED,
+            DIRECT_STOP,
+            decide_direct_motion,
+        )
+
+        assert decide_direct_motion(
+            path_known_free=True,
+            scan_clearance_m=2.0,
+            scan_age_s=0.1,
+            stop_distance_m=0.65,
+            scan_stale_s=0.6,
+        ) == DIRECT_KNOWN_FREE
+        assert decide_direct_motion(
+            path_known_free=False,
+            scan_clearance_m=2.0,
+            scan_age_s=0.1,
+            stop_distance_m=0.65,
+            scan_stale_s=0.6,
+        ) == DIRECT_SCAN_GUARDED
+        assert decide_direct_motion(
+            path_known_free=True,
+            scan_clearance_m=0.60,
+            scan_age_s=0.1,
+            stop_distance_m=0.65,
+            scan_stale_s=0.6,
+        ) == DIRECT_STOP
+        assert decide_direct_motion(
+            path_known_free=True,
+            scan_clearance_m=2.0,
+            scan_age_s=0.7,
+            stop_distance_m=0.65,
+            scan_stale_s=0.6,
+        ) == DIRECT_STOP
+        assert decide_direct_motion(
+            path_known_free=True,
+            scan_clearance_m=None,
+            scan_age_s=0.1,
+            stop_distance_m=0.65,
+            scan_stale_s=0.6,
+        ) == DIRECT_STOP
+
+    def test_controller_wires_scan_guard_into_all_coarse_direct_paths(self):
+        controller = (ROBOT / "thermal_motion_controller" / "thermal_motion_controller"
+                      / "controller_node.py").read_text()
+        package_xml = (ROBOT / "thermal_motion_controller" / "package.xml").read_text()
+
+        assert "from sensor_msgs.msg import LaserScan" in controller
+        assert "create_subscription(LaserScan" in controller
+        assert "'/scan'" in controller
+        assert "def _direct_guarded_cmd" in controller
+        assert "decide_direct_motion" in controller
+        assert "line_reachable_known_free" in controller
+        assert "'direct_safe'" in controller
+        assert controller.count("_direct_guarded_cmd(") >= 4
+        assert "<exec_depend>sensor_msgs</exec_depend>" in package_xml
+
+    def test_direct_guard_parameters_live_in_yaml(self):
+        import yaml
+
+        params_path = ROBOT / "thermal_bringup" / "config" / "params.yaml"
+        params = yaml.safe_load(params_path.read_text())["controller_node"]["ros__parameters"]
+        assert params["direct_scan_stop_m"] >= 0.5
+        assert 0.0 < params["direct_scan_stale_s"] <= 1.0
+        assert 10.0 <= params["direct_scan_half_angle_deg"] <= 60.0
+
 
 class TestClearance:
     def _params(self, **over):
@@ -320,6 +649,10 @@ class TestResidualStrategyWiring:
         assert "/thermal/clearance" in controller
         assert '"residual"' in runner
         assert "/thermal/clearance" in collector
+        mapper = (ROBOT / "thermal_field_reconstructor" / "thermal_field_reconstructor"
+                  / "thermal_mapper_node.py").read_text()
+        assert "occupancy_grid_has_known_cells" in controller
+        assert "occupancy_grid_has_known_cells" in mapper
 
 
 class TestPairedStats:
@@ -368,3 +701,380 @@ class TestMatrixCompare:
         assert report["metrics"]["source_recall"]["p_value"] < 0.01
         md = mc.render_report(report, "base", "cand")
         assert "source_recall" in md and "precision" in md
+
+
+class TestPhase1Gate:
+    @staticmethod
+    def _write_run(root, case, seed, *, truth, recall, not_reached,
+                   confirmed=None, matched=None, duplicates=0,
+                   arrivals=1, runtime_ms=1.0, with_clearance=True):
+        run_dir = root / case / f"seed{seed}"
+        run_dir.mkdir(parents=True)
+        matched = int(round(recall * truth)) if matched is None else matched
+        confirmed = matched if confirmed is None else confirmed
+        (run_dir / "source_summary.json").write_text(json.dumps({
+            "source_recall": recall,
+            "source_precision": matched / confirmed if confirmed else 0.0,
+            "truth_count": truth,
+            "matched_count": matched,
+            "confirmed_count": confirmed,
+            "duplicate_confirmations": duplicates,
+            "localization_errors_m": [
+                {"truth_id": f"S{i}", "error_m": 0.4}
+                for i in range(matched)
+            ],
+        }))
+        (run_dir / "attribution.json").write_text(json.dumps({
+            "n_truth_sources": truth,
+            "n_matched": matched,
+            "failure_counts": {
+                "not_reached": not_reached,
+                "occluded": 0,
+                "timing_missed": 0,
+                "not_confirmed": 0,
+            },
+            "per_source": {},
+        }))
+        if with_clearance:
+            (run_dir / "clearance.csv").write_text("t,p_clear\n1.0,0.1\n")
+        log_lines = [
+            f"[mapper] [FUSE] n=10 {runtime_ms:.1f}ms occ_map=yes",
+            f"[controller] [CLEARANCE] p_no_undetected=0.1 eval_ms={runtime_ms:.1f}",
+            f"[controller] [RESIDUAL_PLAN] result=target eval_ms={runtime_ms:.1f}",
+        ]
+        log_lines.extend(
+            f"[controller] [COARSE_WP#{i}] arrival ->(1.0,2.0)"
+            for i in range(arrivals)
+        )
+        (run_dir / "launch.log").write_text("\n".join(log_lines) + "\n")
+        return {
+            "name": case,
+            "seed": seed,
+            "passed": True,
+            "missing_counts": [],
+            "duration_s": 120.0,
+            "truth_count": truth,
+            "matched_count": matched,
+            "confirmed_count": confirmed,
+            "source_recall": recall,
+            "source_precision": matched / confirmed if confirmed else 0.0,
+            "duplicate_confirmations": duplicates,
+            "failure_counts": {
+                "not_reached": not_reached,
+                "occluded": 0,
+                "timing_missed": 0,
+                "not_confirmed": 0,
+            },
+        }
+
+    def _roots(self, tmp_path):
+        baseline = tmp_path / "baseline"
+        candidate = tmp_path / "candidate"
+        base_runs, cand_runs = [], []
+        truth_by_scenario = {
+            "static2": 2,
+            "static3": 3,
+            "static5": 5,
+            "dyn4": 4,
+            "dyn5": 5,
+            "birthdeath": 3,
+        }
+        cases = [
+            (f"{world}__{scenario}", truth)
+            for world in ("open", "boxes", "walls", "mixed")
+            for scenario, truth in truth_by_scenario.items()
+        ]
+        for case, truth in cases:
+            for seed in range(101, 106):
+                is_high = truth >= 4
+                base_recall = 0.4 if is_high else 1.0
+                cand_recall = 0.8 if is_high else 0.0
+                base_runs.append(self._write_run(
+                    baseline, case, seed, truth=truth, recall=base_recall,
+                    not_reached=3 if is_high else 0, with_clearance=False))
+                cand_runs.append(self._write_run(
+                    candidate, case, seed, truth=truth, recall=cand_recall,
+                    not_reached=1 if is_high else 0))
+        runner = _load_script("run_multiscenario_matrix")
+        runtime_fingerprint = runner.runtime_bundle_fingerprint()
+        for run in base_runs:
+            world_key, scenario_key = run["name"].split("__", 1)
+            run.update({
+                "strategy": "full",
+                "world": str(runner.PHASE0_WORLD_CLASSES[world_key]),
+                "scenario": str(runner.PHASE0_SCENARIO_CLASSES[scenario_key]),
+            })
+        counts = {
+            "trajectory": 1,
+            "thermal_stats": 1,
+            "field_stats": 1,
+            "map_stats": 1,
+            "grad_stats": 1,
+            "truth_sources": 1,
+            "cmd_vel": 1,
+            "scan_stats": 1,
+            "clearance": 1,
+        }
+        for run in cand_runs:
+            world_key, scenario_key = run["name"].split("__", 1)
+            case = runner.MatrixCase(
+                run["name"],
+                runner.PHASE0_WORLD_CLASSES[world_key],
+                runner.PHASE0_SCENARIO_CLASSES[scenario_key],
+            )
+            run.update({
+                "strategy": "residual",
+                "world": str(case.world),
+                "scenario": str(case.scenario),
+                "collector_returncode": 0,
+                "counts": dict(counts),
+            })
+            run["run_fingerprint"] = runner.build_run_fingerprint(
+                case=case,
+                seed=run["seed"],
+                strategy="residual",
+                duration_s=120.0,
+                warmup_s=36.0,
+                jitter_std_m=0.0,
+                min_recall=0.0,
+                health_only=False,
+                runtime_fingerprint=runtime_fingerprint,
+            )
+            run_dir = candidate / run["name"] / f"seed{run['seed']}"
+            (run_dir / "metadata.json").write_text(json.dumps({"counts": counts}))
+            for filename in runner.COUNT_CSV_ARTIFACTS.values():
+                (run_dir / filename).write_text("t,value\n0,1\n")
+            runner.write_run_result(run_dir, run)
+        for root, runs, strategy in (
+                (baseline, base_runs, "full"),
+                (candidate, cand_runs, "residual")):
+            (root / "matrix_summary.json").write_text(json.dumps({
+                "n_runs": len(runs), "n_passed": len(runs), "runs": runs,
+                "config": {
+                    "preset": "phase0",
+                    "strategy": strategy,
+                    "seeds": [101, 102, 103, 104, 105],
+                    "duration_s": 120.0,
+                    "warmup_s": 36.0,
+                    "jitter_std_m": 0.0,
+                    "min_recall": 0.0,
+                    "health_only": False,
+                    **({
+                        "run_fingerprint_version": runner.RUN_FINGERPRINT_VERSION,
+                        "runtime_bundle_sha256": runtime_fingerprint,
+                    } if strategy == "residual" else {}),
+                },
+            }))
+        return baseline, candidate
+
+    def test_gate_uses_only_four_and_five_source_runs_for_recall(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["groups"]["high_source"]["n"] == 60
+        assert report["groups"]["high_source"]["recall"]["mean_b"] == pytest.approx(0.8)
+        assert report["checks"]["high_source_recall"]["passed"] is True
+        assert report["checks"]["not_reached"]["passed"] is True
+        assert report["passed"] is True
+
+    def test_gate_rejects_waypoint_churn(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        log = candidate / "open__dyn4" / "seed101" / "launch.log"
+        log.write_text(log.read_text() + "".join(
+            f"[controller] [COARSE_WP#{i}] arrival ->(1.0,2.0)\n"
+            for i in range(30)
+        ))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["waypoint_churn"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_missing_candidate_artifact(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        (candidate / "walls__static5" / "seed101" / "clearance.csv").unlink()
+        (candidate / "walls__static5" / "seed101" / "source_summary.json").unlink()
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["artifacts"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_empty_clearance_timeline(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        clearance = candidate / "open__dyn4" / "seed101" / "clearance.csv"
+        clearance.write_text("t,p_clear\n")
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["artifacts"]["passed"] is False
+
+    def test_gate_uses_matrix_duration_when_runs_omit_it(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        summary_path = candidate / "matrix_summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["config"] = {"duration_s": 120.0}
+        for run in summary["runs"]:
+            run.pop("duration_s")
+        summary_path.write_text(json.dumps(summary))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["runtime"]["max_arrival_rate_per_min"] == pytest.approx(0.5)
+        assert report["checks"]["waypoint_churn"]["passed"] is True
+
+    def test_gate_rejects_matching_but_truncated_matrix(
+            self, tmp_path, monkeypatch):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        for root in (baseline, candidate):
+            summary_path = root / "matrix_summary.json"
+            summary = json.loads(summary_path.read_text())
+            summary["runs"] = summary["runs"][:6]
+            summary["n_runs"] = 6
+            summary["n_passed"] = 6
+            summary_path.write_text(json.dumps(summary))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["pairing"]["passed"] is False
+        assert report["passed"] is False
+        markdown = gate.render_report(report)
+        assert "result: **FAIL**" in markdown
+
+        markdown_path = tmp_path / "truncated_gate.md"
+        json_path = tmp_path / "truncated_gate.json"
+        monkeypatch.setattr(sys, "argv", [
+            "phase1_gate.py",
+            str(baseline),
+            str(candidate),
+            "--out", str(markdown_path),
+            "--json-out", str(json_path),
+        ])
+        assert gate.main() == 2
+        assert "result: **FAIL**" in markdown_path.read_text()
+        assert json.loads(json_path.read_text())["passed"] is False
+
+    def test_gate_rejects_duplicate_run_keys(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        for root in (baseline, candidate):
+            summary_path = root / "matrix_summary.json"
+            summary = json.loads(summary_path.read_text())
+            summary["runs"].append(dict(summary["runs"][0]))
+            summary["n_runs"] = len(summary["runs"])
+            summary["n_passed"] = len(summary["runs"])
+            summary_path.write_text(json.dumps(summary))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["pairing"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_nonzero_collector_checkpoint(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        summary_path = candidate / "matrix_summary.json"
+        summary = json.loads(summary_path.read_text())
+        run = summary["runs"][0]
+        run["collector_returncode"] = 1
+        summary_path.write_text(json.dumps(summary))
+        checkpoint = candidate / run["name"] / f"seed{run['seed']}" / "run_result.json"
+        checkpoint.write_text(json.dumps(run))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["candidate_health"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_missing_run_checkpoint(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        checkpoint = candidate / "open__static2" / "seed101" / "run_result.json"
+        checkpoint.unlink()
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["candidate_health"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_reports_malformed_json_as_artifact_failure(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        source_summary = candidate / "walls__static5" / "seed101" / "source_summary.json"
+        source_summary.write_text("{broken")
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["artifacts"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_runtime_bundle_mismatch(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        summary_path = candidate / "matrix_summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["config"]["runtime_bundle_sha256"] = "different-runtime"
+        summary_path.write_text(json.dumps(summary))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["candidate_health"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_rejects_custom_paths_hidden_behind_canonical_case_name(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        runner = _load_script("run_multiscenario_matrix")
+        baseline, candidate = self._roots(tmp_path)
+        fake_world = tmp_path / "easier.world"
+        fake_scenario = tmp_path / "easier.yaml"
+        fake_world.write_text("<sdf version='1.6'><world name='easy'/></sdf>\n")
+        fake_scenario.write_text("sources: []\n")
+
+        summary_path = candidate / "matrix_summary.json"
+        summary = json.loads(summary_path.read_text())
+        run = summary["runs"][0]
+        run["world"] = str(fake_world)
+        run["scenario"] = str(fake_scenario)
+        case = runner.MatrixCase(run["name"], fake_world, fake_scenario)
+        config = summary["config"]
+        run["run_fingerprint"] = runner.build_run_fingerprint(
+            case=case,
+            seed=run["seed"],
+            strategy="residual",
+            duration_s=config["duration_s"],
+            warmup_s=config["warmup_s"],
+            jitter_std_m=config["jitter_std_m"],
+            min_recall=config["min_recall"],
+            health_only=False,
+            runtime_fingerprint=config["runtime_bundle_sha256"],
+        )
+        summary_path.write_text(json.dumps(summary))
+        checkpoint = candidate / run["name"] / f"seed{run['seed']}" / "run_result.json"
+        checkpoint.write_text(json.dumps(run))
+
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["pairing"]["passed"] is False
+        assert report["passed"] is False
+
+    def test_gate_reports_schema_invalid_json_as_artifact_failure(self, tmp_path):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        source_summary = candidate / "walls__static5" / "seed101" / "source_summary.json"
+        payload = json.loads(source_summary.read_text())
+        payload["confirmed_count"] = "bad"
+        payload["localization_errors_m"] = 7
+        source_summary.write_text(json.dumps(payload))
+        report = gate.evaluate_roots(baseline, candidate)
+        assert report["checks"]["artifacts"]["passed"] is False
+        assert report["passed"] is False
+
+    @pytest.mark.parametrize(("field", "invalid_value"), [
+        ("source_recall", "bad"),
+        ("truth_count", "bad"),
+        ("failure_counts", []),
+    ])
+    def test_gate_fails_closed_for_invalid_summary_and_checkpoint_metrics(
+            self, tmp_path, field, invalid_value):
+        gate = _load_script("phase1_gate")
+        baseline, candidate = self._roots(tmp_path)
+        summary_path = candidate / "matrix_summary.json"
+        summary = json.loads(summary_path.read_text())
+        run = next(
+            item for item in summary["runs"]
+            if item["name"] == "walls__static5" and item["seed"] == 101)
+        run[field] = invalid_value
+        summary_path.write_text(json.dumps(summary))
+        checkpoint = candidate / run["name"] / f"seed{run['seed']}" / "run_result.json"
+        checkpoint.write_text(json.dumps(run))
+
+        report = gate.evaluate_roots(baseline, candidate)
+
+        assert report["checks"]["pairing"]["passed"] is False
+        assert report["checks"]["artifacts"]["passed"] is False
+        assert report["checks"]["candidate_health"]["passed"] is False
+        assert report["passed"] is False

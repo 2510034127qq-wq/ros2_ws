@@ -14,7 +14,7 @@ v31 fixes vs v30 (targeted, algorithm logic unchanged):
 
   FIX-2: COARSE_SURVEY direct navigation fallback.
     When Nav2 unavailable/failed, robot must still move toward waypoint.
-    Added direct /cmd_vel fallback when nav2_state != NAV2_ACTIVE.
+    Added scan-guarded direct /cmd_vel fallback when nav2_state != NAV2_ACTIVE.
     This was the primary cause of robot stopping after ~40s.
 
   FIX-3: Nav2 goal frame correction.
@@ -23,12 +23,12 @@ v31 fixes vs v30 (targeted, algorithm logic unchanged):
     the static spawn offset remains the fallback.
 
   FIX-4: FRONTIER_NAV direct fallback robustness.
-    Guaranteed cmd_vel output every tick regardless of Nav2 state.
+    Fail-closed linear commands using fresh forward LaserScan evidence.
 
 Generalizability design:
   - Keeps thermal projection and controller in the same physical pose frame
   - Works without SLAM (uses odom-based position)
-  - Works without Nav2 (falls back to direct /cmd_vel everywhere)
+  - Works without Nav2 when /scan is live (guarded direct /cmd_vel fallback)
   - Gradient ascent, Lévy flight, belief map logic unchanged
   - All state transitions driven by thermal sensor signals only
 
@@ -38,7 +38,7 @@ Architecture (layered):
     and execution preference; this node only executes phases and fallbacks.
   FINE states (direct /cmd_vel):
     ASCENT, CONVERGE, SAMPLE, AT_PEAK, RELOCATE, ESCAPE
-  COARSE states (Nav2 preferred + direct fallback):
+  COARSE states (Nav2 preferred + scan-guarded direct fallback):
     FRONTIER_NAV, COARSE_SURVEY, DEPARTURE (direct only, target may be unmapped)
 
 Refs:
@@ -62,9 +62,23 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
                         QoSHistoryPolicy, QoSDurabilityPolicy)
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32
 from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMap
-from thermal_motion_controller.planning import PlannerWeights, select_residual_target
+from thermal_motion_controller.planning import (
+    PlannerWeights,
+    operational_waypoint_min_distance,
+    select_residual_target,
+)
+from thermal_motion_controller.navigation_policy import (
+    DIRECT_STOP,
+    GOAL_KEEP,
+    GOAL_REPLACE,
+    GOAL_SEND,
+    decide_direct_motion,
+    decide_goal_action,
+    forward_clearance,
+)
 from thermal_motion_controller import clearance as clearance_mod
 from thermal_motion_controller.target_selection import (
     EXECUTION_DIRECT_FIRST,
@@ -314,6 +328,10 @@ class ControllerNode(Node):
         self.declare_parameter('clearance_eval_interval_s', 10.0)
         self.declare_parameter('clearance_domain_radius_m', 12.0)
         self.declare_parameter('clearance_terminate', False)
+        self.declare_parameter('residual_planner_min_evidence', 1.5)
+        self.declare_parameter('residual_planner_footprint_radius', 2.0)
+        self.declare_parameter('residual_planner_top_k', 64)
+        self.declare_parameter('residual_waypoint_min_d', 3.0)
         self.declare_parameter('sample_min_trise',            8.0)
         self.declare_parameter('post_confirm_cooldown_s',   60.0)
         self.declare_parameter('adaptive_thresholds_enabled', True)
@@ -373,6 +391,10 @@ class ControllerNode(Node):
         self.declare_parameter('nav2_progress_timeout_s', 4.0)
         self.declare_parameter('nav2_progress_min_delta', 0.35)
         self.declare_parameter('nav2_stall_direct_s', 16.0)
+        self.declare_parameter('nav2_goal_min_interval_s', 3.0)
+        self.declare_parameter('direct_scan_stop_m', 0.65)
+        self.declare_parameter('direct_scan_stale_s', 0.6)
+        self.declare_parameter('direct_scan_half_angle_deg', 30.0)
 
         # ── Read parameters ───────────────────────────────────────────────
         g = self.get_parameter
@@ -457,6 +479,13 @@ class ControllerNode(Node):
         self._clearance_terminate = bool(g('clearance_terminate').value)
         self._clearance_last_eval = 0.0
         self._clearance_value = None
+        self._residual_planner_min_evidence = float(
+            g('residual_planner_min_evidence').value)
+        self._residual_planner_footprint_radius = float(
+            g('residual_planner_footprint_radius').value)
+        self._residual_planner_top_k = max(1, int(
+            g('residual_planner_top_k').value))
+        self._residual_waypoint_min_d = float(g('residual_waypoint_min_d').value)
         self._occ_view = None
         if self._random_seed > 0:
             random.seed(self._random_seed)
@@ -522,6 +551,11 @@ class ControllerNode(Node):
         self._nav2_progress_timeout_s = float(g('nav2_progress_timeout_s').value)
         self._nav2_progress_min_delta = float(g('nav2_progress_min_delta').value)
         self._nav2_stall_direct_s = float(g('nav2_stall_direct_s').value)
+        self._nav2_goal_min_interval_s = float(g('nav2_goal_min_interval_s').value)
+        self._direct_scan_stop_m = float(g('direct_scan_stop_m').value)
+        self._direct_scan_stale_s = float(g('direct_scan_stale_s').value)
+        self._direct_scan_half_angle = math.radians(float(
+            g('direct_scan_half_angle_deg').value))
 
         self._source_seek_selector = SourceSeekTargetSelector(SourceSeekConfig(
             source_repulsion_k=self._rep_k,
@@ -633,6 +667,7 @@ class ControllerNode(Node):
         self._departure_progress_goal = None
         self._departure_progress_best_d = float('inf')
         self._departure_progress_t = 0.0
+        self._departure_direct_safe: bool = False
 
         # ── COARSE_SURVEY ─────────────────────────────────────────────────
         self._coarse_wp: Optional[Tuple[float,float]] = None
@@ -642,6 +677,7 @@ class ControllerNode(Node):
         self._survey_t_start: Optional[float] = None
         self._coarse_wp_count: int = 0
         self._coarse_wp_execution_hint: str = 'nav2_preferred'
+        self._coarse_wp_direct_safe: bool = False
 
         # ── Cold field detection ──────────────────────────────────────────
         self._frontier_cold_start: Optional[float] = None
@@ -662,7 +698,14 @@ class ControllerNode(Node):
             center_x=self._spawn_x, center_y=self._spawn_y,
             size_m=50.0, resolution=0.5)
         self._frontier_target: Optional[Tuple[float,float]] = None
+        self._frontier_direct_safe: bool = False
         self._frontier_last_upd: float = 0.0
+
+        # ── Local direct-motion guard ──────────────────────────────────────
+        self._front_clearance_m: Optional[float] = None
+        self._front_scan_t: float = 0.0
+        self._direct_guard_mode: Dict[str, str] = {}
+        self._direct_guard_log_t: Dict[str, float] = {}
 
         # ── [v30] TF2 for SLAM position ───────────────────────────────────
         self._tf_buffer   = Buffer()
@@ -674,6 +717,7 @@ class ControllerNode(Node):
         self._nav2_goal_handle                  = None
         self._nav2_current_goal: Optional[Tuple[float,float]] = None
         self._nav2_last_send_t: float           = 0.0
+        self._nav2_goal_generation: int         = 0
         self._nav2_ready: bool = False
         self._nav2_check_t: float = 0.0
         self._nav2_progress_goal = None
@@ -693,6 +737,7 @@ class ControllerNode(Node):
         self.create_subscription(ThermalMap,    '/thermal/map',      self._map_cb,  rel)
         self.create_subscription(SourceEstimateArray, '/thermal/sources', self._sources_cb, rel)
         self.create_subscription(Odometry,      '/odom',             self._odom_cb, be)
+        self.create_subscription(LaserScan,     '/scan',             self._scan_cb, be)
         occ_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.RELIABLE,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -801,20 +846,23 @@ class ControllerNode(Node):
         if now < self._nav2_direct_until:
             return False
 
-        # Already navigating to same goal
-        if self._nav2_state == NAV2_ACTIVE and self._nav2_current_goal is not None:
-            cx, cy = self._nav2_current_goal
-            if math.hypot(tx-cx, ty-cy) < 0.5:
-                return True
-
-        # Waiting for server response
-        if self._nav2_state == NAV2_SENDING:
+        action = decide_goal_action(
+            self._nav2_state,
+            self._nav2_current_goal,
+            (tx, ty),
+            now,
+            self._nav2_last_send_t,
+            self._nav2_goal_min_interval_s,
+        )
+        if action == GOAL_KEEP:
+            return True
+        if action == GOAL_REPLACE:
+            self.get_logger().info(
+                f'[NAV2_REPLACE] old={self._nav2_current_goal} new=({tx:.1f},{ty:.1f})')
+            self._cancel_nav2_goal()
             return False
-
-        # Rate limit: max one attempt per 3s
-        if self._nav2_state in (NAV2_IDLE, NAV2_DONE):
-            if (now - self._nav2_last_send_t) < 3.0:
-                return False
+        if action != GOAL_SEND:
+            return False
 
         if self._pose_source == 'odom' and self._tf_ready:
             dx = tx - self._wx
@@ -844,18 +892,37 @@ class ControllerNode(Node):
         self._nav2_state        = NAV2_SENDING
         self._nav2_current_goal = (tx, ty)
         self._nav2_last_send_t  = now
+        self._nav2_goal_generation += 1
+        generation = self._nav2_goal_generation
 
         send_future = self._nav2_client.send_goal_async(
             goal_msg, feedback_callback=self._nav2_feedback_cb)
-        send_future.add_done_callback(self._nav2_goal_response_cb)
+        send_future.add_done_callback(
+            lambda future, generation=generation:
+            self._nav2_goal_response_cb(future, generation))
 
         self.get_logger().info(
             f'[NAV2→] Goal world=({tx:.1f},{ty:.1f}) '
             f'map=({goal_map_x:.1f},{goal_map_y:.1f}) state={self._state}')
         return False  # Not active yet; fallback handles movement this tick
 
-    def _nav2_goal_response_cb(self, future):
-        goal_handle = future.result()
+    def _nav2_goal_response_cb(self, future, generation=None):
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            if generation == self._nav2_goal_generation:
+                self._nav2_state = NAV2_IDLE
+                self._nav2_goal_handle = None
+                self._nav2_current_goal = None
+            self.get_logger().warn(f'[NAV2_RESPONSE_ERROR] {exc}')
+            return
+        if generation != self._nav2_goal_generation:
+            if goal_handle.accepted:
+                goal_handle.cancel_goal_async()
+                self.get_logger().info(
+                    f'[NAV2_STALE_CANCEL] generation={generation} '
+                    f'current={self._nav2_goal_generation}')
+            return
         if not goal_handle.accepted:
             # Goal rejected (e.g. map too small, target unreachable)
             self._nav2_state       = NAV2_IDLE
@@ -865,10 +932,14 @@ class ControllerNode(Node):
         self._nav2_goal_handle = goal_handle
         self._nav2_state       = NAV2_ACTIVE
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._nav2_result_cb)
+        result_future.add_done_callback(
+            lambda future, generation=generation:
+            self._nav2_result_cb(future, generation))
         self.get_logger().info(f'[NAV2✓] Goal accepted, navigating...')
 
-    def _nav2_result_cb(self, future):
+    def _nav2_result_cb(self, future, generation=None):
+        if generation != self._nav2_goal_generation:
+            return
         result = future.result()
         status_str = 'SUCCEEDED' if result.status == 4 else f'status={result.status}'
         self.get_logger().info(
@@ -882,6 +953,7 @@ class ControllerNode(Node):
 
     def _cancel_nav2_goal(self):
         """Cancel Nav2 goal before entering FINE mode (direct /cmd_vel)."""
+        self._nav2_goal_generation += 1
         if self._nav2_goal_handle is not None and self._nav2_state == NAV2_ACTIVE:
             self._nav2_goal_handle.cancel_goal_async()
             self.get_logger().info('[NAV2✗cancel] Cancelled → switching to direct /cmd_vel')
@@ -950,6 +1022,18 @@ class ControllerNode(Node):
                 self._path_length += math.hypot(nx-self._prev_pos[0], ny-self._prev_pos[1])
             self._prev_pos = (nx, ny)
             self._wx, self._wy = nx, ny
+
+    def _scan_cb(self, msg: LaserScan):
+        """Cache only the forward clearance needed by direct-motion fallback."""
+        self._front_clearance_m = forward_clearance(
+            msg.ranges,
+            angle_min=msg.angle_min,
+            angle_increment=msg.angle_increment,
+            range_min=msg.range_min,
+            range_max=msg.range_max,
+            half_angle_rad=self._direct_scan_half_angle,
+        )
+        self._front_scan_t = time.monotonic()
 
     def _grad_cb(self, msg: GradientArray):
         self._last_ga = msg
@@ -1036,11 +1120,33 @@ class ControllerNode(Node):
                 self.get_logger().warn(f'[THERMAL_MAP] bad shape: {exc}')
 
     def _occ_map_cb(self, msg: OccupancyGrid):
+        if not fr_visibility.occupancy_grid_has_known_cells(
+                msg.data, msg.info.width, msg.info.height):
+            if not getattr(self, '_empty_occ_warned', False):
+                self._empty_occ_warned = True
+                self.get_logger().warn(
+                    f'[OCC_MAP_SKIP] unusable size={msg.info.width}x{msg.info.height} '
+                    f'data={len(msg.data)} known=0; retaining previous valid map')
+            return
         self._occ_view = fr_visibility.from_flat(
             msg.data, msg.info.width, msg.info.height,
             msg.info.origin.position.x + self._spawn_x,
             msg.info.origin.position.y + self._spawn_y,
             msg.info.resolution)
+        if not getattr(self, '_occ_map_diag_logged', False):
+            self._occ_map_diag_logged = True
+            values = np.asarray(msg.data, dtype=np.int16)
+            free_count = int(np.count_nonzero(
+                (values >= 0) & (values < self._occ_view.occupied_threshold)))
+            occupied_count = int(np.count_nonzero(
+                values >= self._occ_view.occupied_threshold))
+            self.get_logger().info(
+                f'[OCC_MAP] size={msg.info.width}x{msg.info.height} '
+                f'res={msg.info.resolution:.3f} '
+                f'world_origin=({self._occ_view.origin_x:.2f},'
+                f'{self._occ_view.origin_y:.2f}) '
+                f'free={free_count} occupied={occupied_count} '
+                f'unknown={int(values.size-free_count-occupied_count)}')
 
     def _residual_snapshot(self):
         m = self._thermal_map
@@ -1059,19 +1165,67 @@ class ControllerNode(Node):
         resid = self._residual_snapshot()
         if m is None or resid is None:
             return None
+        effective_min_d = operational_waypoint_min_distance(
+            configured_min_d=self._residual_waypoint_min_d,
+            arrival_radius=self._frontier_r,
+            resolution=m['resolution'],
+        )
+        if self._survey_wp_max_d <= effective_min_d:
+            self.get_logger().warn(
+                '[RESIDUAL_TARGET_REJECT/invalid_bounds] '
+                f'min={effective_min_d:.2f} max={self._survey_wp_max_d:.2f}')
+            return None
         reach_fn = None
+        candidate_valid_mask = None
+        candidate_count = -1
+        annulus_candidate_count = -1
         if self._occ_view is not None:
+            yy, xx = np.mgrid[0:m['height'], 0:m['width']]
+            cwx = m['origin_x'] + (xx.astype(np.float32) + 0.5) * m['resolution']
+            cwy = m['origin_y'] + (yy.astype(np.float32) + 0.5) * m['resolution']
+            candidate_valid_mask = fr_visibility.known_free_at(
+                self._occ_view, cwx, cwy)
+            candidate_count = int(np.count_nonzero(candidate_valid_mask))
+            annulus_dist = np.hypot(cwx - self._wx, cwy - self._wy)
+            annulus_candidate_count = int(np.count_nonzero(
+                candidate_valid_mask
+                & (annulus_dist >= effective_min_d)
+                & (annulus_dist <= self._survey_wp_max_d)))
             reach_fn = (lambda x0, y0, x1, y1:
-                        fr_visibility.line_reachable(self._occ_view, x0, y0, x1, y1))
+                        fr_visibility.line_reachable_plannable(
+                            self._occ_view, x0, y0, x1, y1))
+        plan_t0 = time.monotonic()
         target = select_residual_target(
             self._wx, self._wy,
             m['width'], m['height'], m['resolution'],
             m['origin_x'], m['origin_y'],
             resid, m['view_state'], m['last_seen_age_s'],
             known_sources=[(sx, sy) for sx, sy, _ in self._found_sources],
+            min_d=effective_min_d,
+            max_d=self._survey_wp_max_d,
+            safe_dist=self._safe_dist(),
+            residual_floor=self._residual_planner_min_evidence,
+            footprint_radius=self._residual_planner_footprint_radius,
+            top_k=self._residual_planner_top_k,
+            candidate_valid_mask=candidate_valid_mask,
             line_reachable_fn=reach_fn)
+        eval_ms = (time.monotonic() - plan_t0) * 1000.0
+        self.get_logger().info(
+            f'[RESIDUAL_PLAN] result={"target" if target is not None else "none"} '
+            f'min_d={effective_min_d:.2f} max_d={self._survey_wp_max_d:.2f} '
+            f'known_free={candidate_count} annulus={annulus_candidate_count} '
+            f'eval_ms={eval_ms:.1f}')
         if target is None:
             return None
+        target_dist = math.hypot(target.x - self._wx, target.y - self._wy)
+        if target_dist + 1e-6 < effective_min_d:
+            self.get_logger().warn(
+                '[RESIDUAL_TARGET_REJECT/too_close] '
+                f'd={target_dist:.2f} min={effective_min_d:.2f} '
+                f'arrival={self._frontier_r:.2f}')
+            return None
+        direct_safe = fr_visibility.line_reachable_known_free(
+            self._occ_view, self._wx, self._wy, target.x, target.y)
         return StrategyTarget(
             x=target.x,
             y=target.y,
@@ -1079,7 +1233,8 @@ class ControllerNode(Node):
             reason=target.reason,
             execution_hint=EXECUTION_NAV2_PREFERRED,
             metadata={'label': 'residual',
-                      'reachable': getattr(target, 'metadata_reachable', True)},
+                      'reachable': getattr(target, 'metadata_reachable', True),
+                      'direct_safe': direct_safe},
         )
 
     def _evaluate_clearance(self):
@@ -1296,6 +1451,47 @@ class ControllerNode(Node):
         v=v if abs(err)<math.radians(35) else 0.05
         return v, ang
 
+    def _target_path_known_free(self, tx: float, ty: float) -> bool:
+        return fr_visibility.line_reachable_known_free(
+            self._occ_view, self._wx, self._wy, tx, ty)
+
+    def _direct_guarded_cmd(
+            self, tx: float, ty: float, speed: float,
+            now: float, context: str):
+        """Return a target-following command with a fail-closed scan guard.
+
+        A known-free map segment and locally guarded motion into unknown space
+        remain distinct evidence classes.  Both require a fresh forward scan;
+        without it, linear velocity is suppressed while angular alignment may
+        continue.
+        """
+        path_known_free = self._target_path_known_free(tx, ty)
+        scan_age = (now - self._front_scan_t
+                    if self._front_scan_t > 0.0 else float('inf'))
+        mode = decide_direct_motion(
+            path_known_free=path_known_free,
+            scan_clearance_m=self._front_clearance_m,
+            scan_age_s=scan_age,
+            stop_distance_m=self._direct_scan_stop_m,
+            scan_stale_s=self._direct_scan_stale_s,
+        )
+        lin, ang = self._drive_toward_yaw(self._yaw_toward(tx, ty), speed)
+        if mode == DIRECT_STOP:
+            lin = 0.0
+
+        previous = self._direct_guard_mode.get(context)
+        last_log = self._direct_guard_log_t.get(context, 0.0)
+        if mode != previous or (now - last_log) >= 5.0:
+            clearance = ('none' if self._front_clearance_m is None
+                         else f'{self._front_clearance_m:.2f}')
+            age = 'none' if not math.isfinite(scan_age) else f'{scan_age:.2f}'
+            self.get_logger().info(
+                f'[DIRECT_GUARD/{context}] mode={mode} '
+                f'direct_safe={path_known_free} scan_m={clearance} age_s={age}')
+            self._direct_guard_mode[context] = mode
+            self._direct_guard_log_t[context] = now
+        return lin, ang, mode, path_known_free
+
     def _update_armed(self, T):
         if not self._peak_armed:
             if T < self._ambient_est + self._rearm_delta:
@@ -1455,10 +1651,13 @@ class ControllerNode(Node):
             if target is not None:
                 self._frontier_last_upd = now
                 self._frontier_target = target.xy
+                self._frontier_direct_safe = bool(
+                    target.metadata.get('direct_safe', False))
                 self.get_logger().info(
                     f'[FRONTIER/residual/{target.reason}] '
                     f'→({target.x:.1f},{target.y:.1f}) score={target.score:.3f} '
-                    f'reachable={target.metadata.get("reachable", True)}')
+                    f'reachable={target.metadata.get("reachable", True)} '
+                    f'direct_safe={self._frontier_direct_safe}')
                 return
         if not force and (now-self._frontier_last_upd)<self._frontier_upd:
             return
@@ -1479,6 +1678,7 @@ class ControllerNode(Node):
         if target is not None:
             fx, fy = target.xy
             self._frontier_target=(fx,fy)
+            self._frontier_direct_safe = self._target_path_known_free(fx, fy)
             self.get_logger().info(
                 f'[FRONTIER/{mode_str}/{target.reason}] →({fx:.1f},{fy:.1f}) score={target.score:.3f} '
                 f'd={math.hypot(fx-self._wx,fy-self._wy):.1f}m')
@@ -1492,6 +1692,7 @@ class ControllerNode(Node):
             if target is not None:
                 fx, fy = target.xy
                 self._frontier_target = (fx, fy)
+                self._frontier_direct_safe = self._target_path_known_free(fx, fy)
                 self._frontier_last_upd = now
                 self._search_rounds = 0
                 self.get_logger().info(
@@ -1505,6 +1706,7 @@ class ControllerNode(Node):
         lx, ly = target.xy
         direction = target.metadata.get('direction', self._yaw_toward(lx, ly))
         self._frontier_target=(lx,ly); self._frontier_last_upd=now; self._search_rounds=0
+        self._frontier_direct_safe = self._target_path_known_free(lx, ly)
         self.get_logger().info(
             f'[LEVY] step={step:.1f}m dir={math.degrees(direction):.0f}deg '
             f'→({lx:.1f},{ly:.1f})')
@@ -1541,6 +1743,8 @@ class ControllerNode(Node):
             min_travel_d=departure_min_d,
         )
         tx, ty = target.xy
+        self._departure_direct_safe = self._target_path_known_free(tx, ty)
+        target.metadata['direct_safe'] = self._departure_direct_safe
         cx, cy = target.metadata.get('centroid', self._sources_centroid())
         yaw = target.metadata.get('yaw')
         label = target.metadata.get('label', 'selector')
@@ -1548,7 +1752,8 @@ class ControllerNode(Node):
         self.get_logger().info(
             f'[DEPARTURE_WP/{target.reason}] strategy={target.strategy} '
             f'hint={target.execution_hint} centroid=({cx:.1f},{cy:.1f}){yaw_text} '
-            f'→({tx:.1f},{ty:.1f}) d_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m')
+            f'→({tx:.1f},{ty:.1f}) d_robot={math.hypot(tx-self._wx,ty-self._wy):.1f}m '
+            f'direct_safe={self._departure_direct_safe}')
         return (tx, ty)
 
     def _tracker_source_ready_for_sample(self, est: Optional[Dict], trise: float, elapsed: float) -> bool:
@@ -1629,8 +1834,8 @@ class ControllerNode(Node):
             self.get_logger().warn(f'[DEPARTURE→COARSE] timeout {elapsed:.0f}s')
             self._enter_coarse_survey(reason='departure_timeout'); return
 
-        nav_yaw = self._yaw_toward(tx, ty)
-        lin, ang = self._drive_toward_yaw(nav_yaw, self._departure_speed)
+        lin, ang, _, self._departure_direct_safe = self._direct_guarded_cmd(
+            tx, ty, self._departure_speed, now, 'departure')
         self._pub.publish(self._make_cmd(lin, ang))
 
         if not hasattr(self,'_dep_log_t') or (now-self._dep_log_t)>=10.0:
@@ -1672,8 +1877,11 @@ class ControllerNode(Node):
             )
         if target is None:
             self._coarse_wp_execution_hint = 'nav2_preferred'
+            self._coarse_wp_direct_safe = False
             return None
         self._coarse_wp_execution_hint = target.execution_hint
+        self._coarse_wp_direct_safe = bool(target.metadata.get(
+            'direct_safe', self._target_path_known_free(target.x, target.y)))
         cx, cy = target.metadata.get('centroid', self._sources_centroid())
         yaw = target.metadata.get('yaw')
         label = target.metadata.get('label', 'selector')
@@ -1681,7 +1889,8 @@ class ControllerNode(Node):
         self.get_logger().info(
             f'[COARSE_WP/{target.reason}] strategy={target.strategy} '
             f'hint={target.execution_hint} centroid=({cx:.1f},{cy:.1f}){yaw_text} '
-            f'→({target.x:.1f},{target.y:.1f})')
+            f'→({target.x:.1f},{target.y:.1f}) '
+            f'direct_safe={self._coarse_wp_direct_safe}')
         return target.xy
 
     def _enter_coarse_survey(self, initial_wp=None, reason='unknown'):
@@ -1690,12 +1899,16 @@ class ControllerNode(Node):
         self._survey_buf=[]; self._survey_t_start=None
         if initial_wp is not None:
             self._coarse_wp=initial_wp
+            self._coarse_wp_direct_safe = self._target_path_known_free(*initial_wp)
             self._coarse_wp_execution_hint = (
                 EXECUTION_DIRECT_FIRST if reason == 'source_set_expansion' else 'nav2_preferred'
             )
         else:
             wp=self._coarse_waypoint()
             self._coarse_wp=wp or (self._wx+5, self._wy)
+            if wp is None:
+                self._coarse_wp_direct_safe = self._target_path_known_free(
+                    *self._coarse_wp)
         self._coarse_wp_t=now; self._coarse_wp_count=0
         self._last_survey_pause_t=now; self._frontier_cold_start=None
         self.get_logger().info(
@@ -1712,23 +1925,23 @@ class ControllerNode(Node):
             self._last_survey_pause_t = now + direct_first_s
             self.get_logger().info(
                 f'[COARSE_DIRECT_FIRST] reason={reason} {direct_first_s:.0f}s before Nav2 retry and survey pause')
-        # Attempt Nav2 goal; direct fallback guarantees movement if Nav2 fails
+        # Attempt Nav2 goal; guarded fallback can move if Nav2 fails.
         self._send_nav2_goal(self._coarse_wp[0], self._coarse_wp[1])
 
     def _exec_coarse_survey(self, now: float):
         """
         COARSE_SURVEY: systematic area coverage for heat source search.
 
-        FIX-2: Added guaranteed direct navigation fallback.
-        When Nav2 is unavailable or rejected the goal, robot MUST still move
-        toward the waypoint using direct /cmd_vel.
+        FIX-2: Added scan-guarded direct navigation fallback.
+        When Nav2 is unavailable or rejects the goal, direct /cmd_vel is
+        permitted only while fresh LaserScan evidence clears the forward path.
 
         Priority order:
           P1: Real-time thermal signal > threshold → enter FINE mode (ASCENT)
           P2: Periodic survey pause (stop+sense)
           P3: Waypoint management (arrival/timeout → new waypoint)
           P4: Nav2 goal maintenance (try to keep Nav2 active)
-          P5: [FIX-2] Direct nav fallback (always runs when Nav2 not active)
+          P5: [FIX-2] Guarded direct fallback when Nav2 is not active
         """
         trise = self._temp_rise()
 
@@ -1791,27 +2004,28 @@ class ControllerNode(Node):
                 ang_rnd = random.uniform(-math.pi, math.pi)
                 self._coarse_wp = (self._wx + step*math.cos(ang_rnd),
                                    self._wy + step*math.sin(ang_rnd))
+                self._coarse_wp_direct_safe = self._target_path_known_free(
+                    *self._coarse_wp)
                 self._coarse_wp_t = now
             tx, ty = self._coarse_wp
-            # Try Nav2; fallback below guarantees movement if it fails
+            # Try Nav2; guarded fallback below handles unavailable Nav2.
             self._send_nav2_goal(tx, ty)
 
         elif self._nav2_state in (NAV2_IDLE, NAV2_DONE):
             # Nav2 finished/failed: retry
             self._send_nav2_goal(tx, ty)
 
-        # ★ FIX-2: Direct navigation fallback ★
-        # This runs EVERY tick when Nav2 is not actively navigating.
-        # Ensures robot always moves, regardless of Nav2 availability.
+        # ★ FIX-2: guarded direct navigation fallback ★
+        # This evaluates every tick when Nav2 is not actively navigating;
+        # linear velocity fails closed when scan evidence is absent or blocked.
         tx2, ty2 = self._coarse_wp
         dist2 = math.hypot(tx2 - self._wx, ty2 - self._wy)
         self._nav2_progress_stalled(tx2, ty2, now, 'coarse')
 
         if self._nav2_state != NAV2_ACTIVE:
             if dist2 > self._frontier_r:
-                # Drive directly toward waypoint
-                nav_yaw = self._yaw_toward(tx2, ty2)
-                lin, ang = self._drive_toward_yaw(nav_yaw, self._frontier_lin)
+                lin, ang, _, self._coarse_wp_direct_safe = self._direct_guarded_cmd(
+                    tx2, ty2, self._frontier_lin, now, 'coarse')
                 self._pub.publish(self._make_cmd(lin, ang))
             else:
                 # At waypoint, slow rotation while computing next target
@@ -2248,23 +2462,22 @@ class ControllerNode(Node):
             self._refresh_frontier(now, force=True)
         self._refresh_frontier(now)
 
-        # ★ FIX-4: FRONTIER_NAV guaranteed movement ★
-        # Try Nav2 first; always fallback to direct nav this tick.
+        # ★ FIX-4: FRONTIER_NAV guarded fallback ★
+        # Try Nav2 first; evaluate guarded direct navigation this tick.
         # nav2_sent=False because _send_nav2_goal returns False until goal is accepted.
         if self._frontier_target is not None:
             tx, ty = self._frontier_target
             # Try Nav2 (rate-limited, non-blocking)
             self._send_nav2_goal(tx, ty)
             self._nav2_progress_stalled(tx, ty, now, 'frontier')
-            # Always ensure robot moves this tick
+            # Use direct motion only under the local LaserScan guard.
             if self._nav2_state != NAV2_ACTIVE:
-                # Direct navigation fallback (works with or without Nav2)
-                lin, ang = self._drive_toward_yaw(self._yaw_toward(tx, ty),
-                                                   self._frontier_lin)
+                lin, ang, _, self._frontier_direct_safe = self._direct_guarded_cmd(
+                    tx, ty, self._frontier_lin, now, 'frontier')
                 self._pub.publish(self._make_cmd(lin, ang))
         else:
             # No frontier yet: slow rotation to gather sensor data
-            self._pub.publish(self._make_cmd(0.05, self._max_ang * 0.4))
+            self._pub.publish(self._make_cmd(0.0, self._max_ang * 0.4))
 
         # Periodic status log
         if int(elapsed*self._rate) % 50 == 0:
