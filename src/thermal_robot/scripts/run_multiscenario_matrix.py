@@ -510,7 +510,7 @@ def load_resumable_result(
     if not isinstance(counts, dict):
         return None
     required_counts = list(REQUIRED_PIPELINE_COUNTS)
-    if strategy == "residual":
+    if strategy in ("residual", "fast", "dual", "gp_ucb"):
         required_counts.append("clearance")
     try:
         result_count_values = {
@@ -526,7 +526,7 @@ def load_resumable_result(
         "launch.log",
     ]
     required_artifacts.extend(COUNT_CSV_ARTIFACTS.values())
-    if strategy == "residual":
+    if strategy in ("residual", "fast", "dual", "gp_ucb"):
         required_artifacts.append("clearance.csv")
     if any(not (Path(run_dir) / filename).exists()
            for filename in required_artifacts):
@@ -590,7 +590,7 @@ def load_resumable_result(
         return None
     if (Path(run_dir) / "launch.log").stat().st_size <= 0:
         return None
-    if strategy == "residual":
+    if strategy in ("residual", "fast", "dual", "gp_ucb"):
         if (_csv_data_row_count(Path(run_dir) / "clearance.csv")
                 != result_count_values["clearance"]):
             return None
@@ -641,6 +641,7 @@ def run_case(
         f"scenario_file:={shlex.quote(str(case.scenario))}",
         f"run_seed:={int(seed)}",
         f"strategy:={strategy}",
+        f"use_sim_time:={'true' if strategy in ('fast', 'dual', 'gp_ucb') else 'false'}",
         f"scenario_jitter_std_m:={jitter_std_m}",
     ])
     if health_only:
@@ -729,7 +730,7 @@ def run_case(
     attribution = _load_json(run_dir / "attribution.json")
     counts = metadata.get("counts", {})
     required_counts = list(REQUIRED_PIPELINE_COUNTS)
-    if strategy == "residual":
+    if strategy in ("residual", "fast", "dual", "gp_ucb"):
         required_counts.append("clearance")
     missing_counts = [key for key in required_counts if int(counts.get(key, 0) or 0) <= 0]
     recall = float(summary.get("source_recall", 0.0) or 0.0)
@@ -782,7 +783,7 @@ def main() -> int:
     parser.add_argument("--worlds", default="", help="phase0 world class filter, e.g. open,boxes")
     parser.add_argument("--cases", default="", help="phase0 case filter, e.g. open__static2")
     parser.add_argument("--seeds", default="101,102,103,104,105", help="comma-separated run seeds")
-    parser.add_argument("--strategy", choices=["full", "frontier", "levy", "residual"], default="full")
+    parser.add_argument("--strategy", choices=["full", "frontier", "levy", "residual", "fast", "dual", "gp_ucb"], default="full")
     parser.add_argument("--jitter", type=float, default=0.0, help="scenario_jitter_std_m")
     parser.add_argument("--out-root", default="", help="default: /tmp/thermal_matrix_<timestamp>")
     parser.add_argument("--duration", type=float, default=120.0, help="collector duration per run")

@@ -19,6 +19,11 @@ class ClearanceParams:
     residual_block_thresh: float = 1.5
     epsilon: float = 0.05
     domain_radius_m: float = 12.0
+    amplitude_min_c: float = 4.0
+    amplitude_prior_mean_c: float = 15.0
+    detection_noise_c: float = 1.0
+    evidence_memory_s: float = 60.0
+    source_birth_rate_m2_s: float = 0.00001
 
 
 def _popcount8(arr: np.ndarray) -> np.ndarray:
@@ -71,3 +76,35 @@ def expected_calibration_error(claimed, outcomes, n_bins: int = 10) -> float:
     if total == 0:
         return 0.0
     return float(sum(abs(r[2] - r[3]) * r[4] for r in rows) / total)
+
+
+def clearance_with_history(view_state, view_sectors, age_s, cell_area_m2,
+                           params, residual=None, free_mask=None,
+                           detection_distance_m=None, candidate_probabilities=()):
+    """Poisson thinning with exponential amplitude prior conditioned on A>=Amin.
+
+    Detectability integrates a logistic sensor response over amplitude bins;
+    optional distance models attenuation. Age decays negative evidence and
+    admits new births; unseen space always retains full prior mass. This is a
+    model probability, not an empirical calibration claim.
+    """
+    vs=np.asarray(view_state);age=np.maximum(np.asarray(age_s),0.)
+    distances=np.ones(vs.shape) if detection_distance_m is None else np.asarray(detection_distance_m)
+    amplitudes=params.amplitude_min_c + params.amplitude_prior_mean_c*(-np.log(
+        1-(np.arange(16)+.5)/16))
+    attenuation=1/(1+(distances/5.)**2)
+    p_detect=np.zeros(vs.shape,dtype=float)
+    for amplitude in amplitudes:
+        x=(amplitude*attenuation-params.amplitude_min_c)/max(params.detection_noise_c,.01)
+        p_detect += 1/(1+np.exp(-np.clip(x,-60,60)))/len(amplitudes)
+    p_detect *= params.p_detect_per_sector
+    sectors=np.minimum(_popcount8(view_sectors),params.max_effective_sectors)
+    miss=np.where(vs==VIEW_CLEAR,(1-p_detect)**sectors,1.)
+    retention=np.exp(-age/max(params.evidence_memory_s,.01))
+    miss=1-(1-miss)*retention
+    if residual is not None: miss=np.where(np.asarray(residual)>=params.residual_block_thresh,1.,miss)
+    mass=params.source_rate_per_m2*miss+params.source_birth_rate_m2_s*np.minimum(age,params.evidence_memory_s)
+    if free_mask is not None: mass=np.where(free_mask,mass,0.)
+    lam=float(mass.sum()*cell_area_m2)
+    probability=float(np.exp(-lam)*np.prod(1-np.clip(candidate_probabilities,0,1)))
+    return probability,lam

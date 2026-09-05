@@ -13,3 +13,5 @@ uint32[] visit_count
 float32[] last_seen_age_s
 uint8[] view_state
 uint8[] view_sectors
+string measurement_type
+float32[] last_view_distance_m

@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GradientArray.msg"
   "msg/SourceEstimate.msg"
   "msg/SourceEstimateArray.msg"
+  "msg/BeliefState.msg"
   "srv/GetFieldInfo.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )

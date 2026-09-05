@@ -71,6 +71,8 @@ class PreprocessorNode(Node):
         super().__init__('preprocessor_node')
 
         # ── 参数声明 ─────────────────────────────────────────────────────────
+        self.declare_parameter('ambient_temp',22.0)
+        self.declare_parameter('invalid_reset_s',1.0)
         self.declare_parameter('filter_method',     'kalman')
         self.declare_parameter('frame_id',          'thermal_camera')
         self.declare_parameter('moving_avg_window', 8)
@@ -137,14 +139,13 @@ class PreprocessorNode(Node):
     # ── 图像辅助 ─────────────────────────────────────────────────────────────
 
     def _arr(self, msg: Image) -> np.ndarray:
-        n = msg.width * msg.height
-        return np.frombuffer(bytes(msg.data[:n * 4]),
-                             np.float32).reshape(msg.height, msg.width).copy()
+        dtype='>f4' if msg.is_bigendian else '<f4'
+        return np.frombuffer(bytes(msg.data),dtype=dtype).reshape(msg.height,msg.step//4)[:,:msg.width].copy()
 
     def _pack(self, arr: np.ndarray, msg: Image) -> Image:
         out             = Image()
         out.header      = msg.header
-        out.header.frame_id = self._frame
+        if not out.header.frame_id: out.header.frame_id = self._frame
         out.height      = arr.shape[0]
         out.width       = arr.shape[1]
         out.encoding    = '32FC1'
@@ -157,6 +158,8 @@ class PreprocessorNode(Node):
 
     def _temporal_filter(self, z: np.ndarray) -> np.ndarray:
         """对每帧应用选定的时序滤波方法。"""
+        if self._method == 'passthrough':
+            return z.copy()
         if self._method == 'moving_avg':
             self._buf.append(z.copy())
             return np.mean(np.stack(self._buf), axis=0)
@@ -185,7 +188,15 @@ class PreprocessorNode(Node):
     # ── 主回调 ───────────────────────────────────────────────────────────────
 
     def _cb(self, msg: Image):
+        if msg.encoding!='32FC1': return
         z = self._arr(msg)
+        valid=np.isfinite(z)
+        z=np.where(valid,z,float(self.get_parameter('ambient_temp').value)).astype(np.float32)
+        stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+        previous=getattr(self,'_last_input_stamp',None)
+        if (previous is not None and (stamp<=previous or stamp-previous>float(self.get_parameter('invalid_reset_s').value))) or (self._kx is not None and self._kx.shape!=z.shape):
+            self._kx=None;self._buf.clear()
+        self._last_input_stamp=stamp
         self._frame_count += 1
 
         # 首帧初始化
@@ -213,6 +224,7 @@ class PreprocessorNode(Node):
         # 记录输出噪声水平
         self._filt_std_buf.append(float(out.std()))
 
+        out[~valid]=np.nan
         self._pub.publish(self._pack(out, msg))
 
         # 定期日志：显示噪声抑制效果

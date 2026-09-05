@@ -477,6 +477,8 @@ def select_residual_target(
     top_k: int = 64,
     candidate_valid_mask=None,
     line_reachable_fn=None,
+    information_gain=None,
+    w_information: float = 1.0,
 ) -> Optional[PlannerTarget]:
     """Select a footprint-level target with strict optional reachability."""
     if width <= 0 or height <= 0 or resolution <= 0.0:
@@ -527,6 +529,10 @@ def select_residual_target(
     term_blocked = w_blocked * footprint_blocked
     score = (term_resid + term_unseen + term_blocked + w_age * footprint_age
              - w_travel * travel - w_duplicate * duplicate)
+    if information_gain is not None:
+        ig=np.asarray(information_gain,dtype=float).reshape(height,width)
+        if np.isfinite(ig).all():
+            score += w_information * ig
     score[~valid] = -np.inf
     if not np.isfinite(score).any():
         return None

@@ -103,6 +103,8 @@ class GradientNode(Node):
         ga.peak_pixel_y             = uint32_safe(hot_py)
         # ★ v2 fix: report maximum temperature in FOV, not edge temperature ★
         ga.peak_temperature_celsius = float(arr.max())
+        ga.width = W
+        ga.height = H
         ga.method                   = self._method
         self._pub.publish(ga)
 

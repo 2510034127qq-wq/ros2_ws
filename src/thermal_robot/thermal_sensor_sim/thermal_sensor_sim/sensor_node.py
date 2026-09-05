@@ -19,7 +19,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
                         QoSHistoryPolicy, QoSDurabilityPolicy)
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import Odometry
 from thermal_interfaces.msg import SourceEstimate, SourceEstimateArray
 
@@ -33,6 +33,12 @@ from thermal_sensor_sim.scenario import (
     default_config_b_scenario,
     load_scenario_file,
 )
+
+
+from gazebo_msgs.srv import SetEntityState
+from thermal_field_reconstructor.perspective import CameraIntrinsics, SensorPose3D
+from thermal_sensor_sim.surface_scene import (SurfaceRenderer, SensorEffects,
+    objects_from_world, objects_from_sources)
 
 
 class SensorNode(Node):
@@ -51,6 +57,18 @@ class SensorNode(Node):
         self.declare_parameter('scenario_seed', 0)
         self.declare_parameter('scenario_jitter_std_m', 0.0)
 
+        for name,default in [('sensor_model','a'),('world_file',''),('camera_hfov_deg',57.),
+                             ('camera_height_m',.6),('camera_pitch_rad',0.),('camera_yaw_rad',0.),
+                             ('camera_roll_rad',0.),('camera_offset_x_m',0.),('camera_offset_y_m',0.),
+                             ('surface_height_m',1.2),('surface_diameter_m',.6),
+                             ('surface_shape','box'),('surface_hot_faces',[-1]),
+                             ('surface_emissivity',.95),('surface_far_m',15.),
+                             ('surface_noise_std_c',.15),('surface_bias_c',0.),
+                             ('surface_bias_drift_c_s',.001),('surface_emissivity_std',.01),
+                             ('surface_depth_noise_std_m',.01),('surface_dropout_probability',0.)]:
+            self.declare_parameter(name,default)
+        self._sensor_model=str(self.get_parameter('sensor_model').value)
+        if self._sensor_model not in ('a','b'): raise ValueError('sensor_model must be a or b')
         self._rate    = float(self.get_parameter('publish_rate').value)
         self._frame   = self.get_parameter('frame_id').value
         self._W       = int(self.get_parameter('image_width').value)
@@ -79,6 +97,12 @@ class SensorNode(Node):
         self._fov_y = self._scenario.fov_y
         self._t0      = time.monotonic()
 
+        g=lambda name:self.get_parameter(name).value
+        self._intrinsics=CameraIntrinsics.from_hfov(self._W,self._H,float(g('camera_hfov_deg')))
+        objects=objects_from_world(str(g('world_file')),self._ambient) if g('world_file') and self._sensor_model=='b' else []
+        effects=SensorEffects(**{name:g('surface_'+name) for name in (
+            'noise_std_c','bias_c','bias_drift_c_s','emissivity_std','depth_noise_std_m','dropout_probability')},seed=noise_seed)
+        self._renderer=SurfaceRenderer(self._intrinsics,objects,self._ambient,float(g('surface_far_m')),effects)
         self._odom_x   = 0.0
         self._odom_y   = 0.0
         self._odom_yaw = 0.0
@@ -97,8 +121,12 @@ class SensorNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE)
 
         self._pub       = self.create_publisher(Image, '/sim/thermal_raw', pub_qos)
+        self._depth_pub = self.create_publisher(Image, '/thermal/depth', pub_qos)
+        self._camera_pub = self.create_publisher(CameraInfo, '/thermal/camera_info', pub_qos)
         self._truth_pub = self.create_publisher(SourceEstimateArray, '/sim/thermal_sources_truth', pub_qos)
         self._sub       = self.create_subscription(Odometry, '/odom', self._odom_cb, odom_qos)
+        self._state_client=self.create_client(SetEntityState,'/thermal_scene/set_entity_state') if self._sensor_model=='b' else None
+        self._state_futures=[];self._last_body_update=-float('inf')
         self._timer     = self.create_timer(1.0 / self._rate, self._cb)
 
         T_init = self._ambient + sum(
@@ -144,8 +172,34 @@ class SensorNode(Node):
         return field
 
     def _cb(self):
-        t   = time.monotonic() - self._t0
-        arr = self._world_field_at_sensor(t)
+        clock_s=self.get_clock().now().nanoseconds/1e9
+        if not hasattr(self,'_scene_clock_origin'):self._scene_clock_origin=clock_s
+        t=clock_s-self._scene_clock_origin
+        depth=None
+        if self._sensor_model=='a':
+            arr = self._world_field_at_sensor(t)
+        else:
+            g=lambda name:self.get_parameter(name).value
+            yaw=self._odom_yaw
+            ox,oy=float(g('camera_offset_x_m')),float(g('camera_offset_y_m'))
+            pose=SensorPose3D(self._spawn_x+self._odom_x+math.cos(yaw)*ox-math.sin(yaw)*oy,
+                self._spawn_y+self._odom_y+math.sin(yaw)*ox+math.cos(yaw)*oy,float(g('camera_height_m')),
+                yaw+float(g('camera_yaw_rad')),float(g('camera_pitch_rad')),float(g('camera_roll_rad')))
+            faces=[f for f in g('surface_hot_faces') if f>=0]
+            states=self._scenario.all_states(t)
+            self._state_futures=[f for f in self._state_futures if not f.done()]
+            if t-self._last_body_update>=.5 and not self._state_futures and self._state_client.service_is_ready():
+                self._last_body_update=t
+                for state in states:
+                    request=SetEntityState.Request();request.state.name='thermal_body_'+state.source_id
+                    request.state.pose.position.x=float(state.x);request.state.pose.position.y=float(state.y)
+                    request.state.pose.position.z=float(g('surface_height_m'))/2
+                    request.state.pose.orientation.w=1.
+                    request.state.reference_frame='world'
+                    self._state_futures.append(self._state_client.call_async(request))
+            objects=objects_from_sources(states,float(g('surface_height_m')),float(g('surface_diameter_m')),
+                float(g('surface_emissivity')),str(g('surface_shape')),faces,ambient_c=self._ambient)
+            arr,depth=self._renderer.render(pose,t,objects)
 
         msg              = Image()
         msg.header.stamp    = self.get_clock().now().to_msg()
@@ -156,6 +210,16 @@ class SensorNode(Node):
         msg.is_bigendian = False
         msg.step         = self._W * 4
         msg.data         = arr.tobytes()
+        if depth is not None:
+            d=Image();d.header=msg.header;d.height=self._H;d.width=self._W
+            d.encoding='32FC1';d.step=self._W*4;d.data=depth.tobytes()
+            self._depth_pub.publish(d)
+            k=self._intrinsics
+            info=CameraInfo();info.header=msg.header;info.width=self._W;info.height=self._H
+            info.k=[k.fx,0.,k.cx,0.,k.fy,k.cy,0.,0.,1.]
+            info.p=[k.fx,0.,k.cx,0.,0.,k.fy,k.cy,0.,0.,0.,1.,0.]
+            info.distortion_model='plumb_bob';info.d=[0.]*5
+            self._camera_pub.publish(info)
         self._pub.publish(msg)
         self._publish_truth(msg.header, t)
 

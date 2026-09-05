@@ -28,6 +28,12 @@ class ThermalObservation:
     sample_wy: np.ndarray
     temperature: np.ndarray
     confidence: np.ndarray
+    sample_wz: np.ndarray | None = None
+    sample_range_m: np.ndarray | None = None
+
+    @property
+    def frame_id(self):
+        return self.sensor_pose.frame_id
 
     def __post_init__(self):
         n = int(np.asarray(self.temperature).size)

@@ -31,11 +31,36 @@ sim_nav_slam_launch.py — G1 热导航仿真启动文件（SLAM + Nav2 版）
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, OpaqueFunction, SetLaunchConfiguration, RegisterEventHandler
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.event_handlers import OnShutdown
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def prepare_thermal_world(context):
+    import tempfile
+    import yaml
+    from thermal_sensor_sim.scenario import load_scenario_file, default_config_b_scenario, apply_run_seed
+    from thermal_sensor_sim.surface_scene import write_surface_world
+    original=LaunchConfiguration('world_file').perform(context)
+    if LaunchConfiguration('sensor_model').perform(context)!='b':
+        return [SetLaunchConfiguration('thermal_world_file',original)]
+    scenario_path=LaunchConfiguration('scenario_file').perform(context)
+    scenario=load_scenario_file(scenario_path,num_sources=0) if scenario_path else default_config_b_scenario(3)
+    apply_run_seed(scenario,int(LaunchConfiguration('run_seed').perform(context)),
+                   jitter_std_m=float(LaunchConfiguration('scenario_jitter_std_m').perform(context)))
+    with open(LaunchConfiguration('software_params').perform(context)) as stream:
+        config=yaml.safe_load(stream).get('sensor_node',{}).get('ros__parameters',{})
+    fd,path=tempfile.mkstemp(prefix='thermal_surface_',suffix='.world');os.close(fd)
+    write_surface_world(original,scenario,path,config.get('surface_height_m',1.2),
+                        config.get('surface_diameter_m',.6),config.get('surface_shape','box'))
+    def cleanup(context):
+        if os.path.exists(path):os.unlink(path)
+        return []
+    return [SetLaunchConfiguration('thermal_world_file',path),
+            RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=cleanup)]))]
 
 
 def generate_launch_description():
@@ -58,11 +83,17 @@ def generate_launch_description():
     # ── Launch 参数 ────────────────────────────────────────────────────────
     use_rviz     = LaunchConfiguration('use_rviz',     default='true')
     use_gzclient = LaunchConfiguration('use_gzclient', default='true')
-    use_sim_t    = LaunchConfiguration('use_sim_time', default='false')
+    use_sim_t    = LaunchConfiguration('use_sim_time', default='true')
     scenario_file = LaunchConfiguration('scenario_file', default='')
     world_file = LaunchConfiguration('world_file', default=default_world_file)
     run_seed = LaunchConfiguration('run_seed', default='0')
-    strategy = LaunchConfiguration('strategy', default='full')
+    strategy = LaunchConfiguration('strategy', default='dual')
+    sensor_model=LaunchConfiguration('sensor_model',default='a')
+    belief_mode=LaunchConfiguration('belief_mode',default='online')
+    software_params=LaunchConfiguration('software_params',default=os.path.join(bringup_dir,'config','multisource.yaml'))
+    motion_model=ParameterValue(PythonExpression(["'kalman' if '",strategy,"' in ('fast','dual','gp_ucb') else 'legacy'"]),value_type=str)
+    fusion_memory=ParameterValue(PythonExpression(["3.0 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.e9"]),value_type=float)
+    shared={'use_sim_time':use_sim_t,'sensor_model':sensor_model}
     scenario_jitter = LaunchConfiguration('scenario_jitter_std_m', default='0.0')
 
     gz_env = dict(os.environ)
@@ -87,18 +118,22 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_rviz',     default_value='true'),
         DeclareLaunchArgument('use_gzclient', default_value='true'),
-        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('scenario_file', default_value=''),
         DeclareLaunchArgument('world_file', default_value=default_world_file),
         DeclareLaunchArgument('run_seed', default_value='0'),
-        DeclareLaunchArgument('strategy', default_value='full'),
+        DeclareLaunchArgument('strategy', default_value='dual'),
+        DeclareLaunchArgument('sensor_model',default_value='a',choices=['a','b']),
+        DeclareLaunchArgument('belief_mode',default_value='online',choices=['off','shadow','online']),
+        DeclareLaunchArgument('software_params',default_value=os.path.join(bringup_dir,'config','multisource.yaml')),
         DeclareLaunchArgument('scenario_jitter_std_m', default_value='0.0'),
 
+        OpaqueFunction(function=prepare_thermal_world),
         # ══════════════════════════════════════════════════════════════════
         # t=0s: Gazebo + Robot State Publisher
         # ══════════════════════════════════════════════════════════════════
         ExecuteProcess(
-            cmd=['gzserver', '--verbose', world_file,
+            cmd=['gzserver', '--verbose', LaunchConfiguration('thermal_world_file'),
                  '-s', 'libgazebo_ros_init.so',
                  '-s', 'libgazebo_ros_factory.so'],
             additional_env=gz_env,
@@ -247,9 +282,13 @@ def generate_launch_description():
                 package='thermal_sensor_sim',
                 executable='sensor_node',
                 name='sensor_node',
-                parameters=[params_file, {
+                parameters=[params_file,software_params,shared, {
                     'use_sim_time': use_sim_t,
                     'scenario_file': scenario_file,
+                    'world_file':world_file,
+                    'image_width':ParameterValue(PythonExpression(["160 if '",sensor_model,"'=='b' else 64"]),value_type=int),
+                    'image_height':ParameterValue(PythonExpression(["120 if '",sensor_model,"'=='b' else 48"]),value_type=int),
+                    'publish_rate':ParameterValue(PythonExpression(["8.6 if '",sensor_model,"'=='b' else 10.0"]),value_type=float),
                     'scenario_seed': ParameterValue(run_seed, value_type=int),
                     'scenario_jitter_std_m': ParameterValue(scenario_jitter, value_type=float),
                 }],
@@ -259,37 +298,44 @@ def generate_launch_description():
                 package='signal_preprocessor',
                 executable='preprocessor_node',
                 name='preprocessor_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file,software_params,shared,{
+                    'filter_method':ParameterValue(PythonExpression(["'passthrough' if '",sensor_model,"'=='b' else 'kalman'"]),value_type=str),
+                    'spatial_smooth':ParameterValue(PythonExpression(["'",sensor_model,"'!='b'"]),value_type=bool)}],
                 output='both',
             ),
             Node(
                 package='thermal_field_reconstructor',
                 executable='reconstructor_node',
                 name='reconstructor_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file,software_params,shared],
                 output='both',
             ),
             Node(
                 package='thermal_field_reconstructor',
                 executable='thermal_mapper_node',
                 name='thermal_mapper_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file,software_params,shared,{'fusion_memory_s':fusion_memory}],
                 output='both',
             ),
             Node(
                 package='thermal_gradient_processor',
                 executable='gradient_node',
                 name='gradient_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file,software_params,shared],
                 output='both',
             ),
             Node(
                 package='thermal_motion_controller',
                 executable='source_tracker_node',
                 name='source_tracker_node',
-                parameters=[params_file, {'use_sim_time': use_sim_t}],
+                parameters=[params_file,software_params,shared,{'motion_model':motion_model,'strategy':strategy,
+                    'gate_m':ParameterValue(PythonExpression(["3.0 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.25"]),value_type=float),
+                    'max_detection_age_s':ParameterValue(PythonExpression(["1.5 if '",strategy,"' in ('fast','dual','gp_ucb') else 8.0"]),value_type=float),
+                    'merge_radius_m':ParameterValue(PythonExpression(["0.5 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.0"]),value_type=float)}],
                 output='both',
             ),
+            Node(package='thermal_motion_controller',executable='belief_node',name='belief_node',
+                 parameters=[software_params,{'use_sim_time':use_sim_t,'mode':belief_mode}],output='both'),
             # controller_node v30: 热导航决策层
             # - FINE 模式（ASCENT/CONVERGE/SAMPLE）: 直接发布 /cmd_vel
             # - COARSE 模式（DEPARTURE/COARSE_SURVEY/FRONTIER）: NavigateToPose Action
@@ -297,7 +343,7 @@ def generate_launch_description():
                 package='thermal_motion_controller',
                 executable='controller_node',
                 name='controller_node',
-                parameters=[params_file, {
+                parameters=[params_file,software_params,shared, {
                     'use_sim_time': use_sim_t,
                     'random_seed': ParameterValue(run_seed, value_type=int),
                     'strategy': strategy,

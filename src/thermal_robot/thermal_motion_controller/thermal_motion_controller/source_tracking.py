@@ -99,6 +99,7 @@ class SourceTrackerCore:
         self.measurement_variance = float(measurement_variance)
         self.association_gate_chi2 = float(association_gate_chi2)
         self.max_tracks = int(max_tracks)
+        self.measurement_type = "field_direct"
         self._filters = {}
         self._last_motion_s = None
         self._tracks: Dict[str, TrackedSource] = {}
@@ -117,6 +118,9 @@ class SourceTrackerCore:
         origin_y: float,
         last_seen_age_s: Optional[np.ndarray] = None,
     ) -> List[SourceDetection]:
+        if self.motion_model=='kalman':
+            return self._extract_motion_detections(temperature_mean,confidence,resolution,
+                origin_x,origin_y,last_seen_age_s)
         temp = np.asarray(temperature_mean, dtype=np.float32)
         conf = np.asarray(confidence, dtype=np.float32)
         if temp.ndim != 2 or conf.shape != temp.shape or temp.size == 0:
@@ -372,7 +376,7 @@ class SourceTrackerCore:
         matches, unmatched = associate(
             [self._filters[t.track_id] for t in live], detections,
             self.measurement_variance, self.association_gate_chi2,
-            max_distance=max(self.gate_m, 3.0), strength=[t.strength for t in live])
+            max_distance=self.gate_m, strength=[t.strength for t in live])
         updated = set()
         for i, j in matches:
             tr, det = live[i], detections[j]
@@ -431,3 +435,61 @@ class SourceTrackerCore:
                 self._tracks.pop(tr.track_id, None)
                 self._filters.pop(tr.track_id, None)
         return self.tracks
+
+    def _extract_motion_detections(self, temperature, confidence, resolution, ox, oy, age=None):
+        temp=np.asarray(temperature,dtype=float);conf=np.asarray(confidence,dtype=float)
+        if temp.ndim!=2 or conf.shape!=temp.shape or temp.size==0:return []
+        observed=np.isfinite(temp)&np.isfinite(conf)&(conf>=self.min_confidence)
+        if age is not None:
+            age=np.asarray(age)
+            observed &= (age>=0)&(age<=self.max_detection_age_s)
+        rise=np.maximum(temp-self.ambient_temp,0)
+        hot=observed&(rise>=self.min_temp_rise)
+        remaining=set(map(tuple,np.argwhere(hot)))
+        components=[]
+        while remaining:
+            start=min(remaining);remaining.remove(start);stack=[start];component=[]
+            while stack:
+                cell=stack.pop();component.append(cell)
+                for dy in (-1,0,1):
+                    for dx in (-1,0,1):
+                        neighbour=(cell[0]+dy,cell[1]+dx)
+                        if neighbour in remaining:
+                            remaining.remove(neighbour);stack.append(neighbour)
+            components.append(component)
+        results=[]
+        for component in components:
+            cells=np.asarray(component);ys,xs=cells[:,0],cells[:,1]
+            if self.measurement_type=='surface_radiance':
+                # One connected hot surface -> one detection, rather than one
+                # track per noisy local maximum on the same flat hot face.
+                weights=rise[ys,xs]*conf[ys,xs]
+                cy=float(np.average(ys,weights=weights));cx=float(np.average(xs,weights=weights))
+                extent=max(resolution*.5,float(np.sqrt(np.average(
+                    (ys-cy)**2+(xs-cx)**2,weights=weights)))*resolution)
+                results.append(SourceDetection(ox+(cx+.5)*resolution,oy+(cy+.5)*resolution,
+                    float(np.percentile(rise[ys,xs],90)),float(np.mean(conf[ys,xs])),extent))
+                continue
+            peaks=[]
+            for y,x in component:
+                if y<1 or x<1 or y>=temp.shape[0]-1 or x>=temp.shape[1]-1:continue
+                # A partial footprint edge is not evidence of a source maximum.
+                if not observed[y-1:y+2,x-1:x+2].all():continue
+                if temp[y,x]>=np.max(temp[y-1:y+2,x-1:x+2]):peaks.append((rise[y,x],y,x))
+            kept=[]
+            for amplitude,y,x in sorted(peaks,reverse=True):
+                duplicate=False
+                for prev_amp,py,px in kept:
+                    distance=np.hypot(y-py,x-px)*resolution
+                    steps=max(2,int(np.ceil(np.hypot(y-py,x-px)))+1)
+                    iy=np.rint(np.linspace(y,py,steps)).astype(int);ix=np.rint(np.linspace(x,px,steps)).astype(int)
+                    if distance<self.merge_radius_m or np.min(rise[iy,ix])>.8*min(amplitude,prev_amp):
+                        duplicate=True;break
+                if duplicate:continue
+                kept.append((amplitude,y,x))
+                local=(np.abs(ys-y)<=3)&(np.abs(xs-x)<=3)&(rise[ys,xs]>=amplitude*.7)
+                weights=rise[ys[local],xs[local]]*conf[ys[local],xs[local]]
+                cy=float(np.average(ys[local],weights=weights));cx=float(np.average(xs[local],weights=weights))
+                results.append(SourceDetection(ox+(cx+.5)*resolution,oy+(cy+.5)*resolution,
+                    float(amplitude),float(conf[y,x]),max(resolution*2,.5)))
+        return sorted(results,key=lambda d:d.strength*d.confidence,reverse=True)[:self.max_detections]

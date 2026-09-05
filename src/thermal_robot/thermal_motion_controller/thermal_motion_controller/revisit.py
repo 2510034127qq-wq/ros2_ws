@@ -31,7 +31,6 @@ class RevisitScheduler:
                 continue
             if now_s-self.last_selected.get(key,-math.inf)<p.cooldown_s:
                 continue
-            horizon=min(age,p.prediction_horizon_s)
             # Published positions are predictions at their own timestamp. Only
             # predict forward by reception latency, not by last-observation age.
             horizon=min(float(s.get('message_age_s',0)),p.prediction_horizon_s)

@@ -7,9 +7,10 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from thermal_interfaces.msg import SourceEstimate, SourceEstimateArray, ThermalMap
+from thermal_interfaces.msg import SourceEstimate, SourceEstimateArray, ThermalMap, BeliefState
 
 from thermal_motion_controller.source_tracking import SourceTrackerCore, TrackedSource
+from thermal_motion_controller.runtime_policy import slow_output_usable
 
 
 class SourceTrackerNode(Node):
@@ -49,6 +50,22 @@ class SourceTrackerNode(Node):
             update_alpha_min=float(g('update_alpha_min').value),
             max_detection_age_s=float(g('max_detection_age_s').value),
         )
+        for name, default in [('motion_model', 'legacy'), ('update_rate', 2.0),
+                              ('acceleration_std', .4), ('measurement_variance', .15),
+                              ('association_gate_chi2', 9.21), ('max_tracks', 32),
+                              ('slow_prior_enabled', True),('strategy','fast'),('slow_timeout_s',3.)]:
+            self.declare_parameter(name, default)
+        self._tracker.motion_model = str(g('motion_model').value)
+        self._tracker.acceleration_std = float(g('acceleration_std').value)
+        self._tracker.measurement_variance = float(g('measurement_variance').value)
+        self._tracker.association_gate_chi2 = float(g('association_gate_chi2').value)
+        self._tracker.max_tracks = int(g('max_tracks').value)
+        self._update_period = 1.0 / float(g('update_rate').value)
+        self._last_update = -float('inf')
+        self._slow_prior_enabled = bool(g('slow_prior_enabled').value)
+        self._strategy=str(g('strategy').value)
+        self._slow_timeout=float(g('slow_timeout_s').value)
+        self._last_prior_revision = -1
         self._t0 = time.monotonic()
         self._last_log_s = 0.0
         self._last_confirmed = set()
@@ -60,21 +77,28 @@ class SourceTrackerNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
         self.create_subscription(ThermalMap, '/thermal/map', self._map_cb, rel)
+        self.create_subscription(BeliefState, '/thermal/belief', self._prior_cb, rel)
         self._pub = self.create_publisher(SourceEstimateArray, '/thermal/sources', rel)
         self.get_logger().info('source_tracker_node | /thermal/map -> /thermal/sources')
 
     def _map_cb(self, msg: ThermalMap):
         if msg.width == 0 or msg.height == 0:
             return
-        now_s = time.monotonic() - self._t0
+        stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+        if not hasattr(self,'_stamp_origin'): self._stamp_origin=stamp
+        now_s = stamp-self._stamp_origin
+        if self._tracker.motion_model == 'kalman' and now_s-self._last_update < self._update_period:
+            return
+        self._last_update = now_s
         temp = np.asarray(msg.temperature_mean, dtype=np.float32).reshape((msg.height, msg.width))
         conf = np.asarray(msg.confidence, dtype=np.float32).reshape((msg.height, msg.width))
         age = np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape((msg.height, msg.width))
+        self._tracker.measurement_type=msg.measurement_type or "field_direct"
         tracks = self._tracker.update_from_map(
             temp, conf, msg.resolution, msg.origin_x, msg.origin_y, now_s, age)
         out = SourceEstimateArray()
         out.header = msg.header
-        out.header.frame_id = 'world'
+        out.header.frame_id = msg.header.frame_id
         for track in sorted(tracks, key=lambda t: (t.status != 'confirmed', -t.existence_probability)):
             out.sources.append(self._to_msg(msg.header, track))
         self._pub.publish(out)
@@ -83,7 +107,7 @@ class SourceTrackerNode(Node):
     def _to_msg(self, header, track: TrackedSource) -> SourceEstimate:
         msg = SourceEstimate()
         msg.header = header
-        msg.header.frame_id = 'world'
+        msg.header.frame_id = header.frame_id
         msg.id = track.track_id
         msg.status = track.status
         msg.position.x = float(track.x)
@@ -97,7 +121,51 @@ class SourceTrackerNode(Node):
         msg.existence_probability = float(track.existence_probability)
         msg.confidence = float(track.confidence)
         msg.observations = int(track.observations)
+        msg.velocity.x = float(track.vx)
+        msg.velocity.y = float(track.vy)
+        msg.age_s = float(max(0., self._last_update-track.last_seen_s))
+        filt = self._tracker._filters.get(track.track_id)
+        msg.velocity_variance = float(np.trace(filt.covariance[2:,2:])) if filt else 0.
+        msg.reacquisitions = track.reacquisitions
+        msg.last_reacquisition_s = float(track.last_reacquisition_s)
         return msg
+
+    def _prior_cb(self, msg):
+        if (not self._slow_prior_enabled or self._tracker.motion_model != 'kalman'
+                or msg.mode != 'online' or msg.health != 'ready'
+                or msg.revision == self._last_prior_revision):
+            return
+        age = (self.get_clock().now().nanoseconds -
+               (msg.header.stamp.sec*1000000000+msg.header.stamp.nanosec))/1e9
+        if not slow_output_usable(self._strategy,msg.mode,msg.health,0.,age,
+                                  timeout_s=self._slow_timeout):
+            return
+        self._last_prior_revision = msg.revision
+        # Conservative covariance intersection: slow evidence shares observations
+        # with fast tracks and must not be counted as independent measurements.
+        used = set()
+        for src in msg.sources:
+            if src.existence_probability < .9:
+                continue
+            choices = [(np.hypot(t.x-src.position.x,t.y-src.position.y),t)
+                       for t in self._tracker.tracks if t.track_id not in used]
+            if not choices:
+                break
+            distance, track = min(choices,key=lambda pair:pair[0])
+            if distance > self._tracker.gate_m:
+                continue
+            f = self._tracker._filters.get(track.track_id)
+            if f is None:
+                continue
+            slow_cov = np.diag([max(src.covariance_xx,.1),max(src.covariance_yy,.1),
+                                max(src.velocity_variance/2,.2),max(src.velocity_variance/2,.2)])
+            ia,ib=np.linalg.inv(f.covariance),np.linalg.inv(slow_cov)
+            cov=np.linalg.inv(.9*ia+.1*ib)
+            prior=np.array([src.position.x+age*src.velocity.x,src.position.y+age*src.velocity.y,
+                            src.velocity.x,src.velocity.y])
+            f.state=cov@(.9*ia@f.state+.1*ib@prior)
+            f.covariance=cov
+            used.add(track.track_id)
 
     def _log_status(self, tracks, now_s: float):
         confirmed = {t.track_id for t in tracks if t.status == 'confirmed'}

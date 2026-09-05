@@ -21,6 +21,7 @@ from thermal_interfaces.srv import GetFieldInfo
 class ReconstructorNode(Node):
     def __init__(self):
         super().__init__('reconstructor_node')
+        self.declare_parameter('ambient_temp',22.0)
         self.declare_parameter('reconstruction_method',  'direct_linear')
         self.declare_parameter('frame_id',               'thermal_camera')
         self.declare_parameter('resolution_x',           0.01)
@@ -87,11 +88,13 @@ class ReconstructorNode(Node):
         arr = np.frombuffer(bytes(msg.data[:n*4]), np.float32).reshape(
             msg.height, msg.width).copy()
 
+        arr=np.nan_to_num(arr,nan=float(self.get_parameter('ambient_temp').value),posinf=float(self.get_parameter('ambient_temp').value),neginf=float(self.get_parameter('ambient_temp').value))
         t_min  = float(arr.min());  t_max  = float(arr.max())
         t_mean = float(arr.mean()); t_std  = float(arr.std())
 
         tf = ThermalField()
-        tf.header = msg.header; tf.header.frame_id = self._frame
+        tf.header = msg.header
+        if not tf.header.frame_id: tf.header.frame_id = self._frame
         tf.width  = msg.width;  tf.height = msg.height
         tf.resolution_x = self._rx; tf.resolution_y = self._ry
         tf.origin_x     = self._ox; tf.origin_y     = self._oy
@@ -129,6 +132,8 @@ def main(args=None):
     n = ReconstructorNode()
     try: rclpy.spin(n)
     except KeyboardInterrupt: pass
-    finally: n.destroy_node(); rclpy.shutdown()
+    finally:
+        n.destroy_node()
+        if rclpy.ok(): rclpy.shutdown()
 
 if __name__ == '__main__': main()

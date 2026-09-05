@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'controller_node = thermal_motion_controller.controller_node:main',
+            'belief_node = thermal_motion_controller.belief_node:main',
             'source_tracker_node = thermal_motion_controller.source_tracker_node:main',
         ],
     },

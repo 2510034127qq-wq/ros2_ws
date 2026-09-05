@@ -1,0 +1,97 @@
+# Complete software stack. Empirical calibration and Pi 5 timing remain unverified.
+sensor_node:
+  ros__parameters:
+    camera_hfov_deg: 57.0
+    camera_height_m: 0.6
+    camera_pitch_rad: 0.0
+    camera_yaw_rad: 0.0
+    camera_roll_rad: 0.0
+    camera_offset_x_m: 0.0
+    camera_offset_y_m: 0.0
+    surface_height_m: 1.2
+    surface_diameter_m: 0.6
+    surface_shape: box
+    surface_hot_faces: [-1]
+    surface_emissivity: 0.95
+    surface_far_m: 15.0
+    surface_noise_std_c: 0.15
+    surface_bias_c: 0.0
+    surface_bias_drift_c_s: 0.001
+    surface_emissivity_std: 0.01
+    surface_depth_noise_std_m: 0.01
+    surface_dropout_probability: 0.0
+thermal_mapper_node:
+  ros__parameters:
+    camera_hfov_deg: 57.0
+    camera_height_m: 0.6
+    camera_pitch_rad: 0.0
+    camera_yaw_rad: 0.0
+    camera_roll_rad: 0.0
+    camera_offset_x_m: 0.0
+    camera_offset_y_m: 0.0
+    depth_sync_tolerance_s: 0.06
+    projection_near_m: 0.15
+    projection_far_m: 15.0
+    pose_from_tf: false
+source_tracker_node:
+  ros__parameters:
+    update_rate: 2.0
+    acceleration_std: 0.4
+    measurement_variance: 0.15
+    association_gate_chi2: 9.21
+    max_tracks: 32
+    slow_prior_enabled: true
+belief_node:
+  ros__parameters:
+    mode: online
+    update_rate: 1.0
+    ambient_temp: 22.0
+    freshness_s: 1.5
+    residual_birth_threshold: 3.0
+    detection_merge_m: 0.5
+    max_sources: 16
+    acceleration_std: 0.35
+    measurement_variance: 0.2
+    gate_chi2: 9.21
+    gate_m: 3.0
+    survival_time_s: 180.0
+    p_detection: 0.85
+    false_alarm_probability: 0.03
+    birth_probability: 0.15
+    death_probability: 0.025
+    confirm_probability: 0.90
+    birth_hits: 3
+    merge_distance_m: 0.45
+    merge_velocity_m_s: 0.2
+    merge_hits: 3
+    budget_ms: 100.0
+    field_fit_radius_m: 3.0
+    sigma_min_m: 0.25
+    sigma_max_m: 3.0
+controller_node:
+  ros__parameters:
+    slow_timeout_s: 3.0
+    revisit_enabled: true
+    revisit_stale_s: 8.0
+    revisit_cooldown_s: 15.0
+    revisit_max_consecutive: 2
+    residual_enabled: true
+    posterior_information_weight: 1.0
+    surface_standoff_m: 1.2
+    surface_approach_speed: 0.2
+    surface_confirm_hold_s: 1.0
+    surface_source_max_age_s: 1.5
+    thermal_image_width: 64
+    thermal_image_height: 48
+    thermal_fov_x_m: 4.0
+    thermal_fov_y_m: 3.0
+    clearance_calibrated: false
+    clearance_terminate: false
+    clearance_amplitude_min_c: 4.0
+    clearance_amplitude_prior_mean_c: 15.0
+    clearance_evidence_memory_s: 60.0
+    clearance_source_birth_rate_m2_s: 0.00001
+    gp_max_samples: 64
+    gp_max_candidates: 256
+    gp_length_scale_m: 2.0
+    gp_beta: 2.0

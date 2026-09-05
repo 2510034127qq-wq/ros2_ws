@@ -8,3 +8,5 @@ uint32  peak_pixel_x
 uint32  peak_pixel_y
 float32 peak_temperature_celsius
 string  method
+uint32 width
+uint32 height

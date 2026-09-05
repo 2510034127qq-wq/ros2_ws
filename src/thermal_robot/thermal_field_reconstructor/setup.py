@@ -20,6 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'radiometric_input_node = thermal_field_reconstructor.radiometric_input_node:main',
+            'depth_registration_node = thermal_field_reconstructor.depth_registration_node:main',
             'reconstructor_node = thermal_field_reconstructor.reconstructor_node:main',
             'thermal_mapper_node = thermal_field_reconstructor.thermal_mapper_node:main',
         ],

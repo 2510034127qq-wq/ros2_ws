@@ -1,0 +1,28 @@
+# Deterministic integration fixture: one initial in-FOV source exercises the
+# complete confirmation path without depending on long exploration coverage.
+# Two further sources exercise motion and intermittent emission. This is not a
+# replacement for the original generalisation/evaluation scenarios.
+name: software_contract_multisource
+robot:
+  spawn: {x: -6.0, y: 0.0}
+sensor:
+  fov_x_m: 4.0
+  fov_y_m: 3.0
+sources:
+  - id: contract_initial
+    xy: [-5.0, 0.0]
+    amplitude: 30.0
+    sigma_m: 0.6
+    motion: static
+  - id: contract_moving
+    xy: [-1.0, 2.0]
+    amplitude: 25.0
+    sigma_m: 0.8
+    motion: linear
+    motion_params: {vx: 0.025, vy: -0.015}
+  - id: contract_intermittent
+    xy: [-6.0, -4.0]
+    amplitude: 22.0
+    sigma_m: 0.7
+    motion: appear_disappear
+    motion_params: {period_s: 30.0, duty_cycle: 0.5, phase_s: 0.0}

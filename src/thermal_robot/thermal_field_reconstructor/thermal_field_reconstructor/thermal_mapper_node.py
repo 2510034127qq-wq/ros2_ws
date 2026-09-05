@@ -9,13 +9,14 @@ import rclpy
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from thermal_interfaces.msg import ThermalMap
 from tf2_ros import Buffer, ConnectivityException, ExtrapolationException, LookupException, TransformListener
 
 from thermal_field_reconstructor import visibility
 from thermal_field_reconstructor.observation import SensorPose2D, TopDownRectProjector
 from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
+from thermal_field_reconstructor.perspective import CameraIntrinsics, SensorPose3D, PerspectiveProjector
 
 
 class ThermalMapperNode(Node):
@@ -39,6 +40,18 @@ class ThermalMapperNode(Node):
         self.declare_parameter('occupied_threshold', 65)
         self.declare_parameter('visibility_ray_step_m', 0.1)
 
+        for name, default in [('sensor_model','a'),('camera_height_m',.6),
+                              ('camera_pitch_rad',0.),('camera_yaw_rad',0.),('camera_roll_rad',0.),
+                              ('camera_offset_x_m',0.),('camera_offset_y_m',0.),
+                              ('camera_hfov_deg',57.),('depth_sync_tolerance_s',.06),
+                              ('projection_near_m',.15),('projection_far_m',15.),
+                              ('sector_memory_s',60.),('fusion_memory_s',1.e9),('pose_from_tf',False)]:
+            self.declare_parameter(name,default)
+        self._sensor_model=str(self.get_parameter('sensor_model').value)
+        self._camera_info=None
+        self._depth_frames=[]
+        self._pending_images=[]
+        self._last_image_stamp=-float('inf')
         g = self.get_parameter
         self._publish_rate = float(g('publish_rate').value)
         self._frame_id = str(g('frame_id').value)
@@ -63,6 +76,8 @@ class ThermalMapperNode(Node):
             confidence_visit_scale=float(g('confidence_visit_scale').value),
             age_decay_s=float(g('age_decay_s').value),
             unknown_variance=float(g('unknown_variance').value),
+            fusion_memory_s=float(g('fusion_memory_s').value),
+            sector_memory_s=float(g('sector_memory_s').value),
         )
 
         self._odom_x = 0.0
@@ -90,6 +105,8 @@ class ThermalMapperNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
         self.create_subscription(Image, '/thermal/filtered', self._image_cb, be)
+        self.create_subscription(Image, '/thermal/depth', self._depth_cb, be)
+        self.create_subscription(CameraInfo, '/thermal/camera_info', self._camera_cb, be)
         self.create_subscription(Odometry, '/odom', self._odom_cb, be)
         map_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -125,12 +142,23 @@ class ThermalMapperNode(Node):
                     f'[OCC_MAP_SKIP] unusable size={msg.info.width}x{msg.info.height} '
                     f'data={len(msg.data)} known=0; retaining previous valid map')
             return
-        self._occ_view = visibility.from_flat(
-            msg.data, msg.info.width, msg.info.height,
-            msg.info.origin.position.x + self._spawn_x,
-            msg.info.origin.position.y + self._spawn_y,
-            msg.info.resolution,
-            occupied_threshold=self._occupied_threshold)
+        q=msg.info.origin.orientation
+        origin_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+        view=visibility.from_flat(msg.data,msg.info.width,msg.info.height,
+            msg.info.origin.position.x,msg.info.origin.position.y,msg.info.resolution,
+            origin_yaw=origin_yaw)
+        if self._pose_source=='odom':
+            try:
+                tf=self._tf_buffer.lookup_transform('odom',msg.header.frame_id,rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=.01))
+                q=tf.transform.rotation;t=tf.transform.translation
+                yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+                view=visibility.transform_view(view,t.x+self._spawn_x,t.y+self._spawn_y,yaw)
+            except (LookupException,ExtrapolationException,ConnectivityException):
+                return
+        else:
+            view=visibility.transform_view(view,self._spawn_x,self._spawn_y,0.)
+        self._occ_view=view
 
     def _update_pose(self):
         if self._pose_source == 'odom':
@@ -158,13 +186,83 @@ class ThermalMapperNode(Node):
             self._wx = self._spawn_x + self._odom_x
             self._wy = self._spawn_y + self._odom_y
 
+    @staticmethod
+    def _stamp(msg):
+        return msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+
+    def _camera_cb(self,msg):
+        self._camera_info=CameraIntrinsics(msg.width,msg.height,msg.k[0],msg.k[4],msg.k[2],msg.k[5])
+
+    def _depth_cb(self,msg):
+        if msg.encoding!='32FC1':
+            return
+        self._depth_frames.append(msg)
+        self._depth_frames=self._depth_frames[-20:]
+        pending=self._pending_images
+        self._pending_images=[]
+        for image in pending: self._image_cb(image)
+
     def _image_cb(self, msg: Image):
-        n = msg.width * msg.height
-        arr = np.frombuffer(bytes(msg.data[:n * 4]), np.float32).reshape(msg.height, msg.width).copy()
+        if msg.encoding!='32FC1':
+            self.get_logger().error('thermal input must be Celsius 32FC1')
+            return
+        stamp=self._stamp(msg)
+        if stamp<=self._last_image_stamp: return
+        endian='>f4' if msg.is_bigendian else '<f4'
+        arr=np.frombuffer(bytes(msg.data),dtype=endian).reshape(msg.height,msg.step//4)[:,:msg.width].copy()
         self._update_pose()
-        now_s = time.monotonic() - self._t0
-        pose = SensorPose2D(x=self._wx, y=self._wy, yaw=self._yaw)
-        obs = self._projector.project(arr, pose, now_s)
+        # Keep grid time in the image clock, so replay uses recorded chronology.
+        if not hasattr(self,"_image_time_origin"): self._image_time_origin=stamp
+        now_s=stamp-self._image_time_origin
+        if self._sensor_model=='a':
+            pose=SensorPose2D(x=self._wx,y=self._wy,yaw=self._yaw,frame_id=self._frame_id)
+            obs=self._projector.project(arr,pose,now_s)
+        else:
+            if not self._depth_frames:
+                self._pending_images=(self._pending_images+[msg])[-10:]
+                return
+            depth_msg=min(self._depth_frames,key=lambda d:abs(self._stamp(d)-stamp))
+            if abs(self._stamp(depth_msg)-stamp)>float(self.get_parameter('depth_sync_tolerance_s').value):
+                self._pending_images=(self._pending_images+[msg])[-10:]
+                return
+            if depth_msg.header.frame_id!=msg.header.frame_id:
+                self.get_logger().warn('[PROJECTION] depth must be registered into the thermal optical frame')
+                return
+            if bool(self.get_parameter('pose_from_tf').value) and self._camera_info is None:
+                # Hardware projection requires measured calibration, not the
+                # nominal simulation field of view.
+                return
+            depth=np.frombuffer(bytes(depth_msg.data),dtype='>f4' if depth_msg.is_bigendian else '<f4')
+            depth=depth.reshape(depth_msg.height,depth_msg.step//4)[:,:depth_msg.width]
+            k=self._camera_info or CameraIntrinsics.from_hfov(msg.width,msg.height,
+                float(self.get_parameter('camera_hfov_deg').value))
+            g=lambda name:float(self.get_parameter(name).value)
+            ox,oy=g('camera_offset_x_m'),g('camera_offset_y_m')
+            pose=SensorPose3D(self._wx+math.cos(self._yaw)*ox-math.sin(self._yaw)*oy,
+                self._wy+math.sin(self._yaw)*ox+math.cos(self._yaw)*oy,g('camera_height_m'),
+                self._yaw+g('camera_yaw_rad'),g('camera_pitch_rad'),g('camera_roll_rad'),self._frame_id)
+            if bool(self.get_parameter('pose_from_tf').value):
+                try:
+                    tf=self._tf_buffer.lookup_transform(self._frame_id,msg.header.frame_id,
+                        rclpy.time.Time.from_msg(msg.header.stamp),
+                        timeout=rclpy.duration.Duration(seconds=.02))
+                    # TF is optical -> world; recover robot-convention RPY.
+                    q=tf.transform.rotation
+                    optical=np.array([[1-2*(q.y*q.y+q.z*q.z),2*(q.x*q.y-q.z*q.w),2*(q.x*q.z+q.y*q.w)],
+                        [2*(q.x*q.y+q.z*q.w),1-2*(q.x*q.x+q.z*q.z),2*(q.y*q.z-q.x*q.w)],
+                        [2*(q.x*q.z-q.y*q.w),2*(q.y*q.z+q.x*q.w),1-2*(q.x*q.x+q.y*q.y)]])
+                    r=optical@np.array([[0,0,1],[-1,0,0],[0,-1,0]]).T
+                    t=tf.transform.translation
+                    pose=SensorPose3D(t.x,t.y,t.z,math.atan2(r[1,0],r[0,0]),
+                        math.asin(float(np.clip(-r[2,0],-1,1))),math.atan2(r[2,1],r[2,2]),self._frame_id)
+                except (LookupException,ExtrapolationException,ConnectivityException):
+                    return
+            try:
+                obs=PerspectiveProjector(k,g('projection_near_m'),g('projection_far_m')).project(arr,depth,pose,now_s)
+            except ValueError as exc:
+                self.get_logger().warn(f'[PROJECTION] {exc}')
+                return
+        self._last_image_stamp=stamp
         occ = self._occ_view if self._visibility_enabled else None
         t0 = time.monotonic()
         self._grid.integrate_observation(obs, occupancy=occ, ray_step_m=self._ray_step)
@@ -186,6 +284,8 @@ class ThermalMapperNode(Node):
         msg = ThermalMap()
         msg.header = header
         msg.header.frame_id = self._frame_id
+        msg.measurement_type = 'field_direct' if self._sensor_model=='a' else 'surface_radiance'
+        msg.last_view_distance_m=snap.last_view_distance_m.reshape(-1).tolist()
         msg.width = snap.width
         msg.height = snap.height
         msg.resolution = float(snap.resolution)

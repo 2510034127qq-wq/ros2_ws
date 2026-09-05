@@ -34,6 +34,7 @@ class GridSnapshot:
     last_seen_age_s: np.ndarray
     view_state: np.ndarray
     view_sectors: np.ndarray
+    last_view_distance_m: np.ndarray
 
 
 class WorldThermalGrid:
@@ -50,6 +51,8 @@ class WorldThermalGrid:
         confidence_visit_scale: float = 6.0,
         age_decay_s: float = 45.0,
         unknown_variance: float = 100.0,
+        fusion_memory_s: float = float("inf"),
+        sector_memory_s: float = float("inf"),
     ):
         self.resolution = float(resolution)
         self.width = int(round(size_x_m / self.resolution))
@@ -65,6 +68,11 @@ class WorldThermalGrid:
         self.confidence_visit_scale = max(1.0, float(confidence_visit_scale))
         self.age_decay_s = max(1e-3, float(age_decay_s))
         self.unknown_variance = float(unknown_variance)
+        self.fusion_memory_s = float(fusion_memory_s)
+        self.sector_memory_s = float(sector_memory_s)
+        self.last_view_distance_m = np.full(shape,np.nan,dtype=np.float32)
+        self._effective_count = np.zeros(shape, dtype=np.float32)
+        self.sector_last_seen = np.full((*shape, N_VIEW_SECTORS), -1., dtype=np.float32)
         self.blocked_count = np.zeros(shape, dtype=np.uint32)
         self.view_sectors = np.zeros(shape, dtype=np.uint8)
 
@@ -82,15 +90,21 @@ class WorldThermalGrid:
     def integrate_observation(self, obs, occupancy=None,
                               ray_step_m=_visibility.DEFAULT_RAY_STEP_M) -> None:
         """Fuse contract observations, integrating only cells visible in occupancy."""
-        ix, iy, valid = self.world_to_cell(obs.sample_wx, obs.sample_wy)
+        wx=np.asarray(obs.sample_wx); wy=np.asarray(obs.sample_wy)
+        finite=np.isfinite(wx)&np.isfinite(wy)&np.isfinite(obs.temperature)&(np.asarray(obs.confidence)>0)
+        ix, iy, valid = self.world_to_cell(np.where(finite,wx,self.origin_x-1),
+                                           np.where(finite,wy,self.origin_y-1))
+        valid &= finite
         if not np.any(valid):
             return
         values = np.asarray(obs.temperature, dtype=np.float32)[valid]
         linear = iy[valid] * self.width + ix[valid]
         total_cells = self.width * self.height
-        obs_count = np.bincount(linear, minlength=total_cells).astype(np.float32)
-        obs_sum = np.bincount(linear, weights=values, minlength=total_cells).astype(np.float32)
-        obs_sum_sq = np.bincount(linear, weights=values * values, minlength=total_cells).astype(np.float32)
+        weights=np.clip(np.asarray(obs.confidence)[valid],0.,1.)
+        raw_count=np.bincount(linear,minlength=total_cells).astype(np.float32)
+        obs_count = np.bincount(linear, weights=weights, minlength=total_cells).astype(np.float32)
+        obs_sum = np.bincount(linear, weights=weights*values, minlength=total_cells).astype(np.float32)
+        obs_sum_sq = np.bincount(linear, weights=weights*values*values, minlength=total_cells).astype(np.float32)
         cells = np.flatnonzero(obs_count > 0.0)
         if cells.size == 0:
             return
@@ -98,7 +112,7 @@ class WorldThermalGrid:
         cell_ix = (cells % self.width).astype(np.int32)
         cell_iy = (cells // self.width).astype(np.int32)
         cwx, cwy = self.cell_to_world(cell_ix, cell_iy)
-        if occupancy is not None:
+        if occupancy is not None and obs.measurement_type != "surface_radiance":
             visible = _visibility.visible_mask(
                 occupancy, obs.sensor_pose.x, obs.sensor_pose.y,
                 cwx, cwy, step_m=ray_step_m)
@@ -122,14 +136,22 @@ class WorldThermalGrid:
         visit_flat = self.visit_count.reshape(-1)
         last_flat = self.last_seen.reshape(-1)
 
-        prev_n = visit_flat[clear].astype(np.float32)
+        prev_n = self._effective_count.reshape(-1)[clear].copy()
+        if np.isfinite(self.fusion_memory_s):
+            elapsed=np.maximum(0.,float(obs.stamp_s)-last_flat[clear])
+            decay=np.exp(-elapsed/max(self.fusion_memory_s,1e-3))
+            prev_n=self._effective_count.reshape(-1)[clear]*decay
+            m2_flat[clear] *= decay
         prev_mean = mean_flat[clear]
         new_n = prev_n + obs_n
         delta = obs_mean - prev_mean
-        mean_flat[clear] = prev_mean + delta * obs_n / np.maximum(new_n, 1.0)
-        m2_flat[clear] = m2_flat[clear] + obs_m2 + delta * delta * prev_n * obs_n / np.maximum(new_n, 1.0)
-        visit_flat[clear] = np.clip(new_n, 0, np.iinfo(np.uint32).max).astype(np.uint32)
+        mean_flat[clear] = prev_mean + delta * obs_n / np.maximum(new_n, 1e-12)
+        m2_flat[clear] = m2_flat[clear] + obs_m2 + delta * delta * prev_n * obs_n / np.maximum(new_n, 1e-12)
+        self._effective_count.reshape(-1)[clear]=new_n
+        visit_flat[clear] = np.clip(visit_flat[clear].astype(float)+raw_count[clear], 0, np.iinfo(np.uint32).max).astype(np.uint32)
         last_flat[clear] = float(obs.stamp_s)
+        self.last_view_distance_m.reshape(-1)[clear] = np.hypot(
+            cwx[visible]-obs.sensor_pose.x,cwy[visible]-obs.sensor_pose.y)
 
         sector_flat = self.view_sectors.reshape(-1)
         az = np.arctan2(obs.sensor_pose.y - cwy[visible],
@@ -137,6 +159,7 @@ class WorldThermalGrid:
         sector = (((az + np.pi) / (2.0 * np.pi)) * N_VIEW_SECTORS).astype(np.int32)
         sector = np.clip(sector, 0, N_VIEW_SECTORS - 1)
         sector_flat[clear] |= (1 << sector).astype(np.uint8)
+        self.sector_last_seen.reshape(-1,N_VIEW_SECTORS)[clear,sector] = float(obs.stamp_s)
 
     def integrate_image(
         self,
@@ -157,7 +180,7 @@ class WorldThermalGrid:
         self.integrate_observation(obs, occupancy=occupancy)
 
     def snapshot(self, now_s: float) -> GridSnapshot:
-        count_f = self.visit_count.astype(np.float32)
+        count_f = self._effective_count
         variance = np.full_like(self.mean, self.unknown_variance, dtype=np.float32)
         seen = self.visit_count > 1
         variance[seen] = self._m2[seen] / np.maximum(count_f[seen] - 1.0, 1.0)
@@ -170,6 +193,10 @@ class WorldThermalGrid:
         view_state = np.zeros_like(self.mean, dtype=np.uint8)
         view_state[self.blocked_count > 0] = VIEW_BLOCKED_ONLY
         view_state[self.visit_count > 0] = VIEW_CLEAR
+        sectors=self.view_sectors.copy()
+        if np.isfinite(self.sector_memory_s):
+            recent=(self.sector_last_seen>=0)&((float(now_s)-self.sector_last_seen)<=self.sector_memory_s)
+            sectors=np.sum(recent*(1<<np.arange(N_VIEW_SECTORS)),axis=-1).astype(np.uint8)
         return GridSnapshot(
             width=self.width,
             height=self.height,
@@ -182,5 +209,6 @@ class WorldThermalGrid:
             visit_count=self.visit_count.copy(),
             last_seen_age_s=age,
             view_state=view_state,
-            view_sectors=self.view_sectors.copy(),
+            view_sectors=sectors,
+            last_view_distance_m=self.last_view_distance_m.copy(),
         )

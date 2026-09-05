@@ -32,21 +32,23 @@ class OccupancyView:
     resolution: float
     data: np.ndarray
     occupied_threshold: int = DEFAULT_OCCUPIED_THRESHOLD
+    origin_yaw: float = 0.0
 
 
 def from_flat(data, width, height, origin_x, origin_y, resolution,
-              occupied_threshold=DEFAULT_OCCUPIED_THRESHOLD) -> OccupancyView:
+              occupied_threshold=DEFAULT_OCCUPIED_THRESHOLD, origin_yaw=0.0) -> OccupancyView:
     arr = np.asarray(data, dtype=np.int16).reshape((int(height), int(width)))
     return OccupancyView(float(origin_x), float(origin_y), float(resolution),
-                         arr, int(occupied_threshold))
+                         arr, int(occupied_threshold), float(origin_yaw))
 
 
 def occupied_at(view: OccupancyView, wx, wy) -> np.ndarray:
     """Vectorized occupancy query; unknown and out-of-bounds cells are free."""
     wx = np.asarray(wx, dtype=np.float32)
     wy = np.asarray(wy, dtype=np.float32)
-    ix = np.floor((wx - view.origin_x) / view.resolution).astype(np.int32)
-    iy = np.floor((wy - view.origin_y) / view.resolution).astype(np.int32)
+    gx,gy=world_to_grid(view,wx,wy)
+    ix = np.floor(gx).astype(np.int32)
+    iy = np.floor(gy).astype(np.int32)
     h, w = view.data.shape
     inside = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
     out = np.zeros(wx.shape, dtype=bool)
@@ -60,8 +62,9 @@ def known_free_at(view: OccupancyView, wx, wy) -> np.ndarray:
     """Return true only for in-bounds cells explicitly observed as free."""
     wx = np.asarray(wx, dtype=np.float32)
     wy = np.asarray(wy, dtype=np.float32)
-    ix = np.floor((wx - view.origin_x) / view.resolution).astype(np.int32)
-    iy = np.floor((wy - view.origin_y) / view.resolution).astype(np.int32)
+    gx,gy=world_to_grid(view,wx,wy)
+    ix = np.floor(gx).astype(np.int32)
+    iy = np.floor(gy).astype(np.int32)
     h, w = view.data.shape
     inside = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
     out = np.zeros(wx.shape, dtype=bool)
@@ -104,10 +107,8 @@ def _segment_cells(view: OccupancyView, x0: float, y0: float,
     resolution = float(view.resolution)
     if not math.isfinite(resolution) or resolution <= 0.0:
         return []
-    gx0 = (float(x0) - view.origin_x) / resolution
-    gy0 = (float(y0) - view.origin_y) / resolution
-    gx1 = (float(x1) - view.origin_x) / resolution
-    gy1 = (float(y1) - view.origin_y) / resolution
+    gx0,gy0=world_to_grid(view,float(x0),float(y0))
+    gx1,gy1=world_to_grid(view,float(x1),float(y1))
     if not all(math.isfinite(value) for value in (gx0, gy0, gx1, gy1)):
         return []
 
@@ -217,3 +218,16 @@ def line_reachable_known_free(view, x0: float, y0: float, x1: float, y1: float,
     values = _segment_values(view, x0, y0, x1, y1)
     return values is not None and bool(np.all(
         (values >= 0) & (values < view.occupied_threshold)))
+
+
+def world_to_grid(view,x,y):
+    dx=np.asarray(x)-view.origin_x;dy=np.asarray(y)-view.origin_y
+    c,s=math.cos(view.origin_yaw),math.sin(view.origin_yaw)
+    return (c*dx+s*dy)/view.resolution,(-s*dx+c*dy)/view.resolution
+
+
+def transform_view(view,tx,ty,yaw):
+    c,s=math.cos(yaw),math.sin(yaw)
+    return OccupancyView(tx+c*view.origin_x-s*view.origin_y,
+        ty+s*view.origin_x+c*view.origin_y,view.resolution,view.data,
+        view.occupied_threshold,view.origin_yaw+yaw)

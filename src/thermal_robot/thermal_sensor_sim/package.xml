@@ -7,6 +7,8 @@
   <maintainer email="thermal_robot@example.com">thermal_robot</maintainer>
   <license>MIT</license>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>gazebo_msgs</exec_depend>
+  <exec_depend>thermal_field_reconstructor</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>thermal_interfaces</exec_depend>

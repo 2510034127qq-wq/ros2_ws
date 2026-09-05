@@ -1,0 +1,46 @@
+# Sensor calibration/TF and the UGV driver/Nav2 are external inputs, not guesses.
+# This overlay does not start Gazebo or supply synthetic odometry.
+radiometric_input_node:
+  ros__parameters:
+    input_mode: ros
+    device: /dev/video0
+    frame_id: thermal_optical_frame
+    width: 160
+    height: 120
+    rate_hz: 8.6
+    raw_units: tlinear
+    kelvin_scale: 0.01
+    kelvin_offset: 0.0
+    min_c: -40.0
+    max_c: 400.0
+depth_registration_node:
+  ros__parameters:
+    thermal_frame: thermal_optical_frame
+preprocessor_node:
+  ros__parameters:
+    # Moving camera: avoid leaving hot trails with strong pixelwise temporal lag.
+    filter_method: passthrough
+    spatial_smooth: false
+thermal_mapper_node:
+  ros__parameters:
+    sensor_model: b
+    frame_id: map
+    pose_source: tf
+    pose_from_tf: true
+    spawn_x: 0.0
+    spawn_y: 0.0
+    fusion_memory_s: 3.0
+source_tracker_node:
+  ros__parameters:
+    motion_model: kalman
+    gate_m: 3.0
+    merge_radius_m: 0.5
+    max_detection_age_s: 1.5
+controller_node:
+  ros__parameters:
+    sensor_model: b
+    thermal_pose_source: tf
+    spawn_x: 0.0
+    spawn_y: 0.0
+    max_linear_vel: 0.2
+    clearance_terminate: false
