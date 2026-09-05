@@ -6,6 +6,8 @@
 
 主入口仍是 `sim_nav_slam_launch.py`，新增选项：
 
+仿真启动默认 `use_sim_time:=true`，热链路、SLAM 和 Nav2 使用仿真时钟。真实 UGV 覆盖层默认 `false`；录包回放显式设置 `true`。原矩阵脚本对历史策略显式保留旧时钟配置，新策略使用仿真时钟；历史实验结果不混入本次软件验收。
+
 | 参数 | 值 | 行为 |
 |---|---|---|
 | `strategy` | `fast` | Kalman 快层、残差探索、预测重访 |
@@ -35,6 +37,8 @@ B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时
 - 已确认且具有不同身份的源不因一次近距离交叉而合并；未充分支持的重叠簇需持续 merge 证据。
 - 慢层独立进程，发布 `/thermal/belief` 的 health、revision、compute_ms、cardinality_pmf。失败/超预算不输出可用新估计；控制器按健康状态及时间戳拒绝过期后验。
 - online 模式将期望存在性熵降与定位信息收益用于选点，并通过保守协方差交集给快层先验校正。shadow 不影响规划或快层；off 时快层独立运行。
+- `fast` 和 `gp_ucb` 不接受慢层先验，即使慢层仍在 online 估计。`belief_mode` 是启动选项，切换模式时重新启动覆盖层。`off` 在 launch 中显式按字符串传递。
+- 新控制路径按世界坐标接近源并保持停靠距离；直达被挡时尝试已知空闲停靠点与 Nav2 绕行，无可用停靠点或导航停滞时暂缓该源并继续探索，冷却后可重试。Nav2 探索停滞有原有受扫描保护的直接控制回退。
 - 清场概率使用空间 Poisson、幅值先验、扇区漏检及历史衰减，双层另计尚未确认源簇。`clearance_calibrated: false`，默认仅输出，不自动停机。只有用户有标定证据并明确启用时才可用清场触发 DONE。
 
 ## UGV 与 Lepton/PT3
@@ -59,6 +63,8 @@ PT3 可选 `input_mode: uvc`，使用 OpenCV V4L2 Y16 采集。相机必须事�
 
 已对齐的深度可直接发布 `/thermal/depth` 并设置 `register_depth:=false`。未对齐深度由 `depth_registration_node` 使用标定 TF 重投影，深度孔洞保持无效，不填造距离。
 
+**当前采用深度定位路线。Lepton/PT3 自身不输出深度；需要额外提供已标定的深度输入。** 本轮未实现无深度的运动三角化路线。硬件模式缺少 CameraInfo、TF，或热图与深度坐标系不一致时跳过该帧。
+
 录包应包括上述图像、CameraInfo、TF、里程计、雷达与地图。回放用 `ros2 bag play BAG --clock`，覆盖层加 `use_sim_time:=true enable_motion:=false`。如果录包已包含 `/thermal/raw`，再加 `start_input:=false`。真实测温标定、深度误差、车体速度/足迹配置和 Pi 5 负载由用户实机验证。
 
 ## 软件验收
@@ -72,4 +78,22 @@ python3 src/thermal_robot/scripts/run_software_validation.py \
 
 每次使用新输出目录，保留启动日志、probe JSON、轨迹摘要、源估计和图像快照。软件 probe 检查数据链、有效深度、地图观测、运动输出和慢层状态，不以它替代全矩阵 recall/precision 验收。实际结果与剩余限制在最终交付审计中记录。
 
+验证器在启动前比较源码与 install，发现未重新构建的文件直接退出；执行期间检查节点崩溃、话题停止及实际位移。Gazebo Classic 用同一个 master 端口，本工具通过锁防止自身并发运行；请逐个运行验证用例。`--seed`、`--scenario`、`--world`、`--duration` 可选择缩减矩阵。慢层预算注入可通过覆盖 YAML 和 `--expected-health over_budget` 运行。覆盖 YAML 的副本保留在输出目录。
+
+```bash
+# 不需要硬件，验证 UGV 覆盖层的真实 ROS 消息与 TF 接线
+python3 src/thermal_robot/scripts/validate_hardware_contract.py \
+  --out bags/software_validation/my_hardware_contract
+
+# 从保留的数据生成独立图像
+python3 src/thermal_robot/scripts/plot_software_validation.py \
+  bags/software_validation/my_b_dual --out /tmp/b_dual.png
+```
+
+`SourceEstimate` 新增速度、观测年龄、速度方差及重捕获计数；`last_reacquisition_s` 表示该次重捕获前的无检测间隔。`GradientArray` 新增图像尺寸；`ThermalMap` 新增测量类型与最近观测距离；新增 `BeliefState`。升级后应重新构建接口包和全部依赖包，外部消费者也需更新。旧 bag 中自定义派生消息与新定义不保证兼容；优先回放原始热图、深度与 TF，重新计算派生结果。
+
 消融可复制 `multisource.yaml` 后改 `revisit_enabled`、`residual_enabled`、mapper 的 `visibility_enabled`，再用 `software_params` 传入；比较 fast/dual 或 shadow/off 可隔离慢层作用。B 级图像的物理遮挡不应因“去算法可见性”而消失。
+
+去残差、去重访、去算法可见性时建议先固定 `strategy:=fast`，逐项改变参数；慢层消融使用相同场景和 seed 对比 fast/dual 或 online/shadow/off。`posterior_*` 的观测假设调整时应与 `belief_node` 对应参数保持一致。
+
+当前交付证据和已知限制见 [软件交付审计](software_completion_audit.md)。
