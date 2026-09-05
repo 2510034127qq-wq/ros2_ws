@@ -8,6 +8,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .motion_filter import MotionFilter, associate
+
 
 STATUS_CANDIDATE = "candidate"
 STATUS_CONFIRMED = "confirmed"
@@ -42,6 +44,11 @@ class TrackedSource:
     status: str = STATUS_CANDIDATE
     consecutive_observations: int = 1
     ever_confirmed: bool = False
+    vx: float = 0.0
+    vy: float = 0.0
+    reacquisitions: int = 0
+    last_reacquisition_s: float = 0.0
+    first_confirmed_s: float = -1.0
 
 
 class SourceTrackerCore:
@@ -64,6 +71,11 @@ class SourceTrackerCore:
         duplicate_memory_s: float = 60.0,
         update_alpha_min: float = 0.08,
         max_detection_age_s: float = float("inf"),
+        motion_model: str = "legacy",
+        acceleration_std: float = 0.4,
+        measurement_variance: float = 0.15,
+        association_gate_chi2: float = 9.21,
+        max_tracks: int = 32,
     ):
         self.ambient_temp = float(ambient_temp)
         self.min_temp_rise = float(min_temp_rise)
@@ -80,6 +92,15 @@ class SourceTrackerCore:
         self.duplicate_memory_s = float(duplicate_memory_s)
         self.update_alpha_min = max(0.0, min(0.6, float(update_alpha_min)))
         self.max_detection_age_s = float(max_detection_age_s)
+        if motion_model not in ("legacy", "kalman"):
+            raise ValueError("motion_model must be legacy or kalman")
+        self.motion_model = motion_model
+        self.acceleration_std = float(acceleration_std)
+        self.measurement_variance = float(measurement_variance)
+        self.association_gate_chi2 = float(association_gate_chi2)
+        self.max_tracks = int(max_tracks)
+        self._filters = {}
+        self._last_motion_s = None
         self._tracks: Dict[str, TrackedSource] = {}
         self._next_id = 1
 
@@ -146,6 +167,8 @@ class SourceTrackerCore:
         return detections
 
     def update(self, detections: Sequence[SourceDetection], now_s: float) -> List[TrackedSource]:
+        if self.motion_model == "kalman":
+            return self._update_motion(detections, now_s)
         updated_ids = set()
         for det in sorted(detections, key=lambda d: d.confidence * d.strength, reverse=True):
             track = self._nearest_track(det)
@@ -336,3 +359,75 @@ class SourceTrackerCore:
             ):
                 track.status = STATUS_SUPPRESSED
                 track.existence_probability = min(track.existence_probability, 0.05)
+
+    def _update_motion(self, detections, now_s):
+        if self._last_motion_s is not None and now_s <= self._last_motion_s:
+            return self.tracks
+        self._last_motion_s = float(now_s)
+        detections = [d for d in detections if np.isfinite(
+            [d.x, d.y, d.strength, d.confidence, d.sigma]).all() and d.confidence > 0]
+        live = [t for t in self.tracks if t.status != STATUS_SUPPRESSED]
+        for tr in live:
+            self._filters[tr.track_id].predict(now_s, self.acceleration_std)
+        matches, unmatched = associate(
+            [self._filters[t.track_id] for t in live], detections,
+            self.measurement_variance, self.association_gate_chi2,
+            max_distance=max(self.gate_m, 3.0), strength=[t.strength for t in live])
+        updated = set()
+        for i, j in matches:
+            tr, det = live[i], detections[j]
+            gap = now_s - tr.last_seen_s
+            if tr.status == STATUS_STALE:
+                tr.reacquisitions += 1
+                tr.last_reacquisition_s = gap
+            filt = self._filters[tr.track_id]
+            filt.correct((det.x, det.y), self.measurement_variance / max(det.confidence, 0.1))
+            tr.strength = 0.7*tr.strength + 0.3*det.strength
+            tr.sigma = 0.7*tr.sigma + 0.3*det.sigma
+            tr.confidence = det.confidence
+            tr.existence_probability = min(0.999, tr.existence_probability + 0.15)
+            tr.observations += 1
+            tr.consecutive_observations += 1
+            tr.last_seen_s = now_s
+            tr.status = STATUS_CONFIRMED if tr.ever_confirmed else STATUS_CANDIDATE
+            updated.add(tr.track_id)
+        for j in sorted(unmatched):
+            if len(live) >= self.max_tracks:
+                break
+            det = detections[j]
+            # Suppress only duplicate peaks, not the whole neighbourhood of a
+            # historical confirmation: nearby moving sources may be distinct.
+            if any(np.hypot(det.x-self._filters[t.track_id].state[0],
+                            det.y-self._filters[t.track_id].state[1]) < self.merge_radius_m*0.35
+                   for t in live):
+                continue
+            tr = self._new_track(det, now_s)
+            self._filters[tr.track_id] = MotionFilter(
+                np.array([det.x, det.y, 0., 0.]), stamp_s=now_s)
+            live.append(tr)
+            updated.add(tr.track_id)
+        for tr in live:
+            filt = self._filters[tr.track_id]
+            if tr.track_id not in updated:
+                dt = max(0., now_s - tr.last_update_s)
+                tr.existence_probability *= math.exp(-dt/self.stale_decay_s)
+                tr.confidence *= math.exp(-dt/self.stale_decay_s)
+                tr.consecutive_observations = 0
+                if now_s-tr.last_seen_s >= self.stale_after_s:
+                    tr.status = STATUS_STALE
+            tr.x, tr.y, tr.vx, tr.vy = map(float, filt.state)
+            tr.covariance_xx = float(filt.covariance[0, 0])
+            tr.covariance_xy = float(filt.covariance[0, 1])
+            tr.covariance_yy = float(filt.covariance[1, 1])
+            tr.last_update_s = now_s
+            if (tr.status == STATUS_CANDIDATE
+                    and tr.existence_probability >= self.confirm_probability
+                    and tr.consecutive_observations >= self.confirm_observations
+                    and max(tr.covariance_xx, tr.covariance_yy) <= self.confirm_covariance_max):
+                tr.status = STATUS_CONFIRMED
+                tr.ever_confirmed = True
+                tr.first_confirmed_s = now_s
+            if now_s-tr.last_seen_s > self.duplicate_memory_s and tr.existence_probability < 0.05:
+                self._tracks.pop(tr.track_id, None)
+                self._filters.pop(tr.track_id, None)
+        return self.tracks
