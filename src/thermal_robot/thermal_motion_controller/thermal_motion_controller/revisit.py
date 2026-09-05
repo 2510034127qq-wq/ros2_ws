@@ -10,6 +10,7 @@ class RevisitParams:
     prediction_horizon_s: float = 5.0
     max_consecutive: int = 2
     max_age_s: float = 90.0
+    min_probability: float = 0.25
 
 
 class RevisitScheduler:
@@ -27,7 +28,8 @@ class RevisitScheduler:
         for s in sources:
             age=float(s.get('age_s',0))
             key=s['id']
-            if s.get('status')=='suppressed' or age<p.stale_s or age>p.max_age_s:
+            if (s.get('status')=='suppressed' or s.get('probability', 0) < p.min_probability
+                    or age<p.stale_s or age>p.max_age_s):
                 continue
             if now_s-self.last_selected.get(key,-math.inf)<p.cooldown_s:
                 continue

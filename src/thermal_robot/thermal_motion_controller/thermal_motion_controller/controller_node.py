@@ -82,7 +82,9 @@ from thermal_motion_controller.navigation_policy import (
 from thermal_motion_controller import clearance as clearance_mod
 from thermal_motion_controller.belief import detection_information
 from thermal_motion_controller.revisit import RevisitScheduler, RevisitParams
-from thermal_motion_controller.runtime_policy import slow_output_usable,surface_approach_waypoint
+from thermal_motion_controller.runtime_policy import (
+    slow_output_usable, surface_approach_waypoint, CoverageSweep, exploration_goal_due,
+    ExplorationProgress)
 from thermal_motion_controller.gp_ucb import GaussianProcessUCB, GPParams
 from thermal_interfaces.msg import BeliefState
 from thermal_motion_controller.target_selection import (
@@ -475,6 +477,7 @@ class ControllerNode(Node):
             self._strategy_mode = 'full'
         for name,default in [('sensor_model','a'),('slow_timeout_s',3.),
                              ('revisit_enabled',True),('revisit_stale_s',8.),('revisit_cooldown_s',15.),
+                             ('revisit_min_probability',.25),
                              ('revisit_max_consecutive',2),('residual_enabled',True),
                              ('revisit_prediction_horizon_s',5.),('revisit_max_age_s',90.),
                              ('posterior_information_weight',1.),('surface_standoff_m',1.2),
@@ -482,6 +485,12 @@ class ControllerNode(Node):
                              ('posterior_measurement_variance',.2),('surface_robot_radius_m',.35),
                              ('surface_approach_speed',.2),('surface_confirm_hold_s',1.),
                              ('surface_approach_timeout_s',20.),('surface_retry_cooldown_s',20.),
+                             ('exploration_goal_timeout_s',45.),('exploration_arrival_m',.6),
+                             ('camera_sweep_speed_rad_s',.55),('camera_sweep_distance_m',4.),
+                             ('camera_sweep_interval_s',60.),
+                             ('exploration_stall_s',12.),('exploration_retry_s',45.),
+                             ('exploration_failed_radius_m',2.),
+                             ('exploration_turn_weight',.25),
                              ('surface_source_max_age_s',1.5),('thermal_image_width',64),
                              ('thermal_image_height',48),('thermal_fov_x_m',4.),('thermal_fov_y_m',3.),
                              ('clearance_calibrated',False),('clearance_amplitude_min_c',4.),
@@ -498,6 +507,7 @@ class ControllerNode(Node):
             stale_s=float(g('revisit_stale_s').value),cooldown_s=float(g('revisit_cooldown_s').value),
             max_consecutive=int(g('revisit_max_consecutive').value),
             prediction_horizon_s=float(g('revisit_prediction_horizon_s').value),
+            min_probability=float(g('revisit_min_probability').value),
             max_age_s=float(g('revisit_max_age_s').value)))
         self._revisit_enabled=bool(g('revisit_enabled').value)
         self._residual_enabled=bool(g('residual_enabled').value)
@@ -519,6 +529,15 @@ class ControllerNode(Node):
         self._surface_nav_goal=None;self._surface_deferred={}
         self._surface_approach_timeout=float(g('surface_approach_timeout_s').value)
         self._surface_retry_cooldown=float(g('surface_retry_cooldown_s').value)
+        self._explore_timeout=float(g('exploration_goal_timeout_s').value)
+        self._explore_arrival=float(g('exploration_arrival_m').value)
+        self._explore_turn_weight=float(g('exploration_turn_weight').value)
+        self._sweep_speed=min(self._max_ang,float(g('camera_sweep_speed_rad_s').value))
+        self._camera_sweep=CoverageSweep(float(g('camera_sweep_distance_m').value),
+                                         float(g('camera_sweep_interval_s').value))
+        self._sweep_active=False
+        self._explore_progress=ExplorationProgress(float(g('exploration_stall_s').value),
+            float(g('exploration_retry_s').value),float(g('exploration_failed_radius_m').value))
         self._source_registry={}
         self._clearance_params = clearance_mod.ClearanceParams(
             source_rate_per_m2=float(g('clearance_source_rate_per_m2').value),
@@ -1232,8 +1251,8 @@ class ControllerNode(Node):
                    for sx, sy, st in self._found_sources]
         if self._strategy_mode in ('fast','dual','gp_ucb'):
             sources=[(t['x'],t['y'],t['strength'],t.get('sigma',self._heat_sigma))
-                     for t in self._tracker_sources if t['status'] in ('confirmed','stale')
-                     and t.get('age_s',0)<self._revisit.params.max_age_s]
+                     for t in self._tracker_sources if t['status'] == 'confirmed'
+                     and t['probability'] >= .75 and t.get('age_s',0)<self._surface_max_age]
         predicted = fr_residual.predict_field(
             m['width'], m['height'], m['resolution'],
             m['origin_x'], m['origin_y'], self._ambient_est, sources)
@@ -1247,7 +1266,8 @@ class ControllerNode(Node):
             return None
         effective_min_d = operational_waypoint_min_distance(
             configured_min_d=self._residual_waypoint_min_d,
-            arrival_radius=self._frontier_r,
+            arrival_radius=(self._explore_arrival if self._strategy_mode in ('fast','dual','gp_ucb')
+                            else self._frontier_r),
             resolution=m['resolution'],
         )
         if self._survey_wp_max_d <= effective_min_d:
@@ -1259,12 +1279,14 @@ class ControllerNode(Node):
         candidate_valid_mask = None
         candidate_count = -1
         annulus_candidate_count = -1
+        yy, xx = np.mgrid[0:m['height'], 0:m['width']]
+        cwx = m['origin_x']+(xx.astype(np.float32)+.5)*m['resolution']
+        cwy = m['origin_y']+(yy.astype(np.float32)+.5)*m['resolution']
+        if self._strategy_mode in ('fast','dual','gp_ucb'):
+            candidate_valid_mask=self._explore_progress.allowed(cwx,cwy,time.monotonic())
         if self._occ_view is not None:
-            yy, xx = np.mgrid[0:m['height'], 0:m['width']]
-            cwx = m['origin_x'] + (xx.astype(np.float32) + 0.5) * m['resolution']
-            cwy = m['origin_y'] + (yy.astype(np.float32) + 0.5) * m['resolution']
-            candidate_valid_mask = fr_visibility.known_free_at(
-                self._occ_view, cwx, cwy)
+            free = fr_visibility.known_free_at(self._occ_view, cwx, cwy)
+            candidate_valid_mask = free if candidate_valid_mask is None else candidate_valid_mask & free
             candidate_count = int(np.count_nonzero(candidate_valid_mask))
             annulus_dist = np.hypot(cwx - self._wx, cwy - self._wy)
             annulus_candidate_count = int(np.count_nonzero(
@@ -1277,7 +1299,8 @@ class ControllerNode(Node):
         if self._strategy_mode in ('fast','dual') and self._revisit_enabled:
             latency=max(0.,time.monotonic()-self._tracker_sources_t)
             revisit_sources=[dict(t,message_age_s=latency,age_s=t.get('age_s',0)+latency)
-                             for t in self._tracker_sources]
+                             for t in self._tracker_sources
+                             if self._explore_progress.allowed(t['x'],t['y'],time.monotonic())]
             revisit=self._revisit.select(revisit_sources,time.monotonic(),(self._wx,self._wy),reach_fn)
             if revisit is not None:
                 # A close revisit is served by local observation, not an already
@@ -1301,6 +1324,8 @@ class ControllerNode(Node):
             w_residual=1.6 if self._residual_enabled else 0.,
             information_gain=self._posterior_gain(m),
             w_information=self._posterior_weight,
+            heading_yaw=self._odom_yaw,
+            w_turn=self._explore_turn_weight if self._strategy_mode in ('fast','dual') else 0.,
             min_d=effective_min_d,
             max_d=self._survey_wp_max_d,
             safe_dist=self._safe_dist(),
@@ -1418,6 +1443,18 @@ class ControllerNode(Node):
     def _surface_timer(self,now):
         if self._state==STATE_DONE:
             self._pub.publish(Twist());return
+        if self._sensor_model == 'b' and self._surface_nav_goal is None:
+            sweeping=self._camera_sweep.step((self._wx,self._wy),self._odom_yaw,now)
+            if sweeping:
+                if not self._sweep_active:
+                    self._cancel_nav2_goal()
+                    self.get_logger().info('[CAMERA_SWEEP] start')
+                self._sweep_active=True
+                self._pub.publish(self._make_cmd(0.,self._sweep_speed));return
+            if self._sweep_active:
+                self.get_logger().info('[CAMERA_SWEEP] complete')
+                self._sweep_active=False
+                self._surface_wp=None
         if self._surface_nav_goal is not None:
             key,gx,gy,started=self._surface_nav_goal
             arrived=math.hypot(gx-self._wx,gy-self._wy)<.5 or self._nav2_state==NAV2_DONE
@@ -1476,10 +1513,20 @@ class ControllerNode(Node):
             return
         self._surface_target_id=None;self._surface_hold_start=None
         self._state=STATE_COARSE_SURVEY
-        if (self._surface_wp is None or now-self._surface_plan_t>self._frontier_upd
-                or math.hypot(self._surface_wp[0]-self._wx,self._surface_wp[1]-self._wy)<self._frontier_r):
+        if self._surface_wp is not None and self._explore_progress.stalled((self._wx,self._wy),now):
+            self._explore_progress.reject(self._surface_wp,now)
+            self.get_logger().info(f'[EXPLORE_RETARGET] stalled waypoint={self._surface_wp}')
+            self._surface_wp=None
+        if (exploration_goal_due(self._surface_wp,(self._wx,self._wy),now,self._surface_plan_t,
+                                 self._explore_arrival,self._explore_timeout)
+                and (self._surface_wp is not None or now-self._surface_plan_t>=1.)):
+            self._cancel_nav2_goal()
+            if (self._surface_wp is not None
+                    and math.dist(self._surface_wp,(self._wx,self._wy))>self._explore_arrival):
+                self._explore_progress.reject(self._surface_wp,now)
             self._surface_wp=self._coarse_waypoint()
             self._surface_plan_t=now
+            self._explore_progress.reset((self._wx,self._wy),now)
         if self._surface_wp is None:
             self._pub.publish(self._make_cmd(0.,self._max_ang*.25));return
         tx,ty=self._surface_wp
@@ -1510,10 +1557,11 @@ class ControllerNode(Node):
         self._tracker_sources_t = now
         if self._strategy_mode in ('fast','dual','gp_ucb'):
             for src in sources:
-                if src['status'] in ('confirmed','stale'):
+                if src['status'] == 'confirmed' and src['probability'] >= .75:
                     self._source_registry[src['id']]=(src['x'],src['y'],self._ambient_est+src['strength'])
             self._found_sources=[self._source_registry[src['id']] for src in sources
-                if src['id'] in self._source_registry and src.get('age_s',0)<self._revisit.params.max_age_s]
+                if src['id'] in self._source_registry and src['status'] == 'confirmed'
+                and src['probability'] >= .75 and src.get('age_s',0)<self._surface_max_age]
 
     # ────────────────────────────────────────────────────────────────────────
     # Adaptive thresholds (unchanged)
@@ -2102,7 +2150,9 @@ class ControllerNode(Node):
             )
         elif self._strategy_mode in ('residual', 'fast', 'dual', 'gp_ucb'):
             target = self._residual_waypoint()
-            if target is None:
+            # During mapper/SLAM startup a missing feasible target is not
+            # evidence for a long random excursion. Wait/scan and retry.
+            if target is None and self._strategy_mode == 'residual':
                 target = self._source_seek_selector.select_coarse_waypoint(
                     self._strategy_context(),
                     min_d=self._survey_wp_min_d,

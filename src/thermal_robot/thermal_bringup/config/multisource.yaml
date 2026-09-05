@@ -40,6 +40,9 @@ source_tracker_node:
     acceleration_std: 0.4
     measurement_variance: 0.15
     association_gate_chi2: 9.21
+    association_memory_horizon_s: 5.0
+    cold_evidence_decay_s: 2.0
+    lost_velocity_decay_s: 2.0
     max_tracks: 32
     slow_prior_enabled: true
     slow_timeout_s: 3.0
@@ -79,6 +82,7 @@ controller_node:
     revisit_max_consecutive: 2
     revisit_prediction_horizon_s: 5.0
     revisit_max_age_s: 90.0
+    revisit_min_probability: 0.25
     residual_enabled: true
     posterior_information_weight: 1.0
     # Keep these observation assumptions aligned with belief_node when tuning.
@@ -92,6 +96,16 @@ controller_node:
     surface_approach_timeout_s: 20.0
     surface_retry_cooldown_s: 20.0
     surface_source_max_age_s: 1.5
+    exploration_goal_timeout_s: 45.0
+    exploration_arrival_m: 0.6
+    residual_waypoint_min_d: 1.5
+    exploration_stall_s: 12.0
+    exploration_retry_s: 45.0
+    exploration_failed_radius_m: 2.0
+    exploration_turn_weight: 0.25
+    camera_sweep_speed_rad_s: 0.55
+    camera_sweep_distance_m: 4.0
+    camera_sweep_interval_s: 60.0
     thermal_image_width: 64
     thermal_image_height: 48
     thermal_fov_x_m: 4.0

@@ -84,6 +84,9 @@ def main():
                     time.sleep(.5)
                 code=probe.returncode
             log.flush()
+            from evaluate_detection_tracks import evaluate_directory
+            detection_metrics = evaluate_directory(out)
+            (out/'detection_metrics.json').write_text(json.dumps(detection_metrics, indent=2))
             runtime_log=(out/'launch.log').read_text()
             # Inspect before shutdown: expected SIGINT teardown is not a runtime failure.
             crashes=[line for line in runtime_log.splitlines()
@@ -97,6 +100,7 @@ def main():
                 source_approach_confirmations=runtime_log.count('[SURFACE_CONFIRMED]'),
                 blocked_source_deferrals=runtime_log.count('[SURFACE_APPROACH_DEFERRED]'),
                 source_nav2_approaches=runtime_log.count('[SURFACE_APPROACH_NAV2]'),
+                camera_sweeps_completed=runtime_log.count('[CAMERA_SWEEP] complete'),
                 fast_update_ms_max=max(fast_ms) if fast_ms else None,
                 planner_ms_max=max(plan_ms) if plan_ms else None)
             (out/'runtime_diagnostics.json').write_text(json.dumps(diagnostics,indent=2))

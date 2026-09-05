@@ -76,6 +76,9 @@ class SourceTrackerCore:
         measurement_variance: float = 0.15,
         association_gate_chi2: float = 9.21,
         max_tracks: int = 32,
+        association_memory_horizon_s: float = 5.0,
+        cold_evidence_decay_s: float = 2.0,
+        lost_velocity_decay_s: float = 2.0,
     ):
         self.ambient_temp = float(ambient_temp)
         self.min_temp_rise = float(min_temp_rise)
@@ -99,6 +102,11 @@ class SourceTrackerCore:
         self.measurement_variance = float(measurement_variance)
         self.association_gate_chi2 = float(association_gate_chi2)
         self.max_tracks = int(max_tracks)
+        self.association_memory_horizon_s = float(association_memory_horizon_s)
+        self.cold_evidence_decay_s = max(.1, float(cold_evidence_decay_s))
+        self.lost_velocity_decay_s = max(.1, float(lost_velocity_decay_s))
+        self._anchors = {}
+        self._cold_stamps = {}
         self.measurement_type = "field_direct"
         self._filters = {}
         self._last_motion_s = None
@@ -216,7 +224,52 @@ class SourceTrackerCore:
     ) -> List[TrackedSource]:
         detections = self.extract_detections(
             temperature_mean, confidence, resolution, origin_x, origin_y, last_seen_age_s)
-        return self.update(detections, now_s)
+        previous = self._last_motion_s
+        tracks = self.update(detections, now_s)
+        if self.motion_model == 'kalman' and (previous is None or now_s > previous):
+            self._apply_cold_evidence(temperature_mean, confidence, last_seen_age_s,
+                                      resolution, origin_x, origin_y, now_s)
+        return tracks
+
+    def _apply_cold_evidence(self, temperature, confidence, age, resolution, ox, oy, now_s):
+        """Only newly observed cold cells contradict a source; unseen is not cold.
+
+        Require a cold observed centre and neighbours, and no hot support in
+        the footprint. This deliberately leaves occluded/unobserved tracks to
+        ordinary survival decay instead of interpreting occlusion as death.
+        """
+        if age is None:
+            return
+        temp, conf, age = map(np.asarray, (temperature, confidence, age))
+        if temp.ndim != 2 or temp.shape != conf.shape or temp.shape != age.shape:
+            return
+        for tr in self.tracks:
+            if tr.last_seen_s == now_s:
+                self._cold_stamps.pop(tr.track_id, None)
+                continue
+            x, y = int(math.floor((tr.x-ox)/resolution)), int(math.floor((tr.y-oy)/resolution))
+            if not (0 <= y < temp.shape[0] and 0 <= x < temp.shape[1]):
+                continue
+            radius = max(1, int(math.ceil(max(.35, tr.sigma)/resolution)))
+            region = np.s_[max(0,y-radius):y+radius+1, max(0,x-radius):x+radius+1]
+            fresh = (np.isfinite(temp[region]) & (conf[region] >= self.min_confidence)
+                     & (age[region] >= 0) & (age[region] <= self.max_detection_age_s))
+            centre_fresh = (np.isfinite(temp[y,x]) and conf[y,x] >= self.min_confidence
+                            and 0 <= age[y,x] <= self.max_detection_age_s)
+            cold = (centre_fresh and fresh.sum() >= 3
+                    and not np.any(fresh & (temp[region] >= self.ambient_temp+self.min_temp_rise)))
+            if not cold:
+                self._cold_stamps.pop(tr.track_id, None)
+                continue
+            stamp = now_s-float(age[y,x])
+            previous = self._cold_stamps.get(tr.track_id, stamp)
+            self._cold_stamps[tr.track_id] = max(previous, stamp)
+            # Cap gaps: a long absence followed by one frame is one observation.
+            dt = min(1., max(0., stamp-previous))
+            tr.existence_probability *= math.exp(-dt/self.cold_evidence_decay_s)
+            if tr.existence_probability < self.confirm_probability:
+                tr.status = STATUS_STALE
+                tr.consecutive_observations = 0
 
     def _nearest_track(self, det: SourceDetection) -> Optional[TrackedSource]:
         best = None
@@ -372,15 +425,34 @@ class SourceTrackerCore:
             [d.x, d.y, d.strength, d.confidence, d.sigma]).all() and d.confidence > 0]
         live = [t for t in self.tracks if t.status != STATUS_SUPPRESSED]
         for tr in live:
-            self._filters[tr.track_id].predict(now_s, self.acceleration_std)
+            filt = self._filters[tr.track_id]
+            coast_until = tr.last_seen_s+self.association_memory_horizon_s
+            if filt.stamp_s < coast_until < now_s:
+                filt.predict(coast_until, self.acceleration_std)
+            decay = self.lost_velocity_decay_s if now_s > coast_until else None
+            # Short occlusions keep constant velocity. Beyond the coasting
+            # horizon, surface-centroid jitter must not drift across the map.
+            filt.predict(now_s, self.acceleration_std, velocity_decay_s=decay)
+        def allowed(i, j):
+            tr, det = live[i], detections[j]
+            anchor = self._anchors.get(tr.track_id)
+            if anchor is None:
+                return True
+            x, y, speed = anchor
+            horizon = min(max(0., now_s-tr.last_seen_s), self.association_memory_horizon_s)
+            # A prediction drifting for a minute is not identity evidence at a
+            # different heater. Retain bounded short-occlusion motion support.
+            return math.hypot(det.x-x, det.y-y) <= self.gate_m+speed*horizon
         matches, unmatched = associate(
             [self._filters[t.track_id] for t in live], detections,
             self.measurement_variance, self.association_gate_chi2,
-            max_distance=self.gate_m, strength=[t.strength for t in live])
+            max_distance=self.gate_m, strength=[t.strength for t in live], allowed=allowed)
         updated = set()
         for i, j in matches:
             tr, det = live[i], detections[j]
             gap = now_s - tr.last_seen_s
+            retain_confirmation = (tr.ever_confirmed and tr.status != STATUS_CANDIDATE
+                                   and tr.existence_probability >= self.confirm_probability)
             if tr.status == STATUS_STALE:
                 tr.reacquisitions += 1
                 tr.last_reacquisition_s = gap
@@ -393,7 +465,8 @@ class SourceTrackerCore:
             tr.observations += 1
             tr.consecutive_observations += 1
             tr.last_seen_s = now_s
-            tr.status = STATUS_CONFIRMED if tr.ever_confirmed else STATUS_CANDIDATE
+            tr.status = STATUS_CONFIRMED if retain_confirmation else STATUS_CANDIDATE
+            self._anchors[tr.track_id] = (det.x, det.y, float(np.linalg.norm(filt.state[2:])))
             updated.add(tr.track_id)
         for j in sorted(unmatched):
             if len(live) >= self.max_tracks:
@@ -403,12 +476,13 @@ class SourceTrackerCore:
             # historical confirmation: nearby moving sources may be distinct.
             if any(np.hypot(det.x-self._filters[t.track_id].state[0],
                             det.y-self._filters[t.track_id].state[1]) < self.merge_radius_m*0.35
-                   for t in live):
+                   for t in live if t.track_id in updated):
                 continue
             tr = self._new_track(det, now_s)
             self._filters[tr.track_id] = MotionFilter(
                 np.array([det.x, det.y, 0., 0.]), stamp_s=now_s)
             live.append(tr)
+            self._anchors[tr.track_id] = (det.x, det.y, 0.)
             updated.add(tr.track_id)
         for tr in live:
             filt = self._filters[tr.track_id]
@@ -434,6 +508,8 @@ class SourceTrackerCore:
             if now_s-tr.last_seen_s > self.duplicate_memory_s and tr.existence_probability < 0.05:
                 self._tracks.pop(tr.track_id, None)
                 self._filters.pop(tr.track_id, None)
+                self._anchors.pop(tr.track_id, None)
+                self._cold_stamps.pop(tr.track_id, None)
         return self.tracks
 
     def _extract_motion_detections(self, temperature, confidence, resolution, ox, oy, age=None):

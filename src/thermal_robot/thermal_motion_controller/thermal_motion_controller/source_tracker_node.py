@@ -53,6 +53,8 @@ class SourceTrackerNode(Node):
         for name, default in [('motion_model', 'legacy'), ('update_rate', 2.0),
                               ('acceleration_std', .4), ('measurement_variance', .15),
                               ('association_gate_chi2', 9.21), ('max_tracks', 32),
+                              ('association_memory_horizon_s', 5.), ('cold_evidence_decay_s', 2.),
+                              ('lost_velocity_decay_s', 2.),
                               ('slow_prior_enabled', True),('strategy','fast'),('slow_timeout_s',3.)]:
             self.declare_parameter(name, default)
         self._tracker.motion_model = str(g('motion_model').value)
@@ -60,6 +62,9 @@ class SourceTrackerNode(Node):
         self._tracker.measurement_variance = float(g('measurement_variance').value)
         self._tracker.association_gate_chi2 = float(g('association_gate_chi2').value)
         self._tracker.max_tracks = int(g('max_tracks').value)
+        self._tracker.association_memory_horizon_s = float(g('association_memory_horizon_s').value)
+        self._tracker.cold_evidence_decay_s = float(g('cold_evidence_decay_s').value)
+        self._tracker.lost_velocity_decay_s = float(g('lost_velocity_decay_s').value)
         self._update_period = 1.0 / float(g('update_rate').value)
         self._last_update = -float('inf')
         self._slow_prior_enabled = bool(g('slow_prior_enabled').value)
@@ -150,7 +155,10 @@ class SourceTrackerNode(Node):
             if src.existence_probability < .9:
                 continue
             choices = [(np.hypot(t.x-src.position.x,t.y-src.position.y),t)
-                       for t in self._tracker.tracks if t.track_id not in used]
+                       for t in self._tracker.tracks if t.track_id not in used
+                       and t.status == 'confirmed'
+                       and t.existence_probability >= self._tracker.confirm_probability
+                       and self._last_update-t.last_seen_s <= self._tracker.max_detection_age_s]
             if not choices:
                 break
             distance, track = min(choices,key=lambda pair:pair[0])

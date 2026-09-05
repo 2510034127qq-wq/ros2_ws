@@ -9,12 +9,17 @@ class MotionFilter:
     covariance: np.ndarray = field(default_factory=lambda: np.diag([0.4, 0.4, 1.0, 1.0]))
     stamp_s: float = 0.0
 
-    def predict(self, stamp_s, acceleration_std=0.4):
+    def predict(self, stamp_s, acceleration_std=0.4, velocity_decay_s=None):
         dt = float(stamp_s) - self.stamp_s
         if dt < -1e-9:
             raise ValueError("motion time cannot move backwards")
         f = np.eye(4)
         f[0, 2] = f[1, 3] = dt
+        if velocity_decay_s is not None:
+            tau = max(.01, float(velocity_decay_s))
+            decay = np.exp(-dt/tau)
+            f[0, 2] = f[1, 3] = tau*(1-decay)
+            f[2, 2] = f[3, 3] = decay
         g = np.array([[dt*dt/2, 0], [0, dt*dt/2], [dt, 0], [0, dt]])
         self.state = f @ self.state
         self.covariance = f @ self.covariance @ f.T + acceleration_std**2 * (g @ g.T)
@@ -37,7 +42,7 @@ class MotionFilter:
 
 
 def associate(filters, detections, measurement_variance=0.15, gate_chi2=9.21,
-              max_distance=3.0, strength=None):
+              max_distance=3.0, strength=None, allowed=None):
     """One-to-one globally ordered gated association; stable tie breaking.
 
     Motion prediction provides identity through crossings; appearance cost can
@@ -46,11 +51,17 @@ def associate(filters, detections, measurement_variance=0.15, gate_chi2=9.21,
     pairs = []
     for i, filt in enumerate(filters):
         for j, det in enumerate(detections):
-            delta, _, d2 = filt.innovation((det.x, det.y), measurement_variance)
+            if allowed is not None and not allowed(i, j):
+                continue
+            delta, covariance, d2 = filt.innovation((det.x, det.y), measurement_variance)
             if d2 <= gate_chi2 and np.linalg.norm(delta) <= max_distance:
                 appearance = 0.0 if strength is None else abs(np.log(
                     max(det.strength, 0.1)/max(strength[i], 0.1)))
-                pairs.append((d2 + appearance, i, j))
+                # Gaussian likelihood includes its normalizer. Mahalanobis
+                # distance alone rewards a lost track's unbounded uncertainty
+                # and lets it steal observations from a precise current track.
+                log_volume = np.linalg.slogdet(covariance)[1]
+                pairs.append((d2 + log_volume + appearance, i, j))
     used_i, used_j, assignments = set(), set(), []
     for _, i, j in sorted(pairs):
         if i not in used_i and j not in used_j:
