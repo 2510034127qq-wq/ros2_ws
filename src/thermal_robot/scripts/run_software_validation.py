@@ -36,6 +36,10 @@ def main():
         raise RuntimeError('Rebuild before validation; source/install differ: '+
                            ', '.join(str(src) for src,_ in mismatches))
     out=args.out.resolve();out.mkdir(parents=True,exist_ok=False)
+    if args.software_params:
+        preserved=out/'software_params.yaml'
+        preserved.write_bytes(Path(args.software_params).read_bytes())
+        args.software_params=str(preserved)
     env=dict(os.environ,ROS_DOMAIN_ID=str(args.domain),ROS_LOG_DIR=str(out/'roslog'),
              GAZEBO_LOG_PATH=str(out/'gazebo_log'),GAZEBO_MODEL_DATABASE_URI='',
              OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
@@ -70,7 +74,8 @@ def main():
             with (out/'probe.log').open('w') as probe_log:
                 probe=subprocess.Popen([sys.executable,str(Path(__file__).with_name('probe_software_stack.py')),
                     '--out',str(out),'--duration',str(args.duration),'--sensor-model',args.sensor_model,
-                    '--belief-mode',args.belief_mode,'--expected-health',args.expected_health],cwd=ROOT,env=env,stdout=probe_log,stderr=subprocess.STDOUT,
+                    '--strategy',args.strategy,'--belief-mode',args.belief_mode,
+                    '--expected-health',args.expected_health],cwd=ROOT,env=env,stdout=probe_log,stderr=subprocess.STDOUT,
                     start_new_session=True)
                 while probe.poll() is None:
                     if child.poll() is not None:raise RuntimeError('launch stopped during probe')
@@ -84,11 +89,15 @@ def main():
             crashes=[line for line in runtime_log.splitlines()
                      if 'Traceback (most recent call last)' in line or 'process has died' in line]
             plan_ms=[float(v) for v in re.findall(r'\[RESIDUAL_PLAN\].*eval_ms=([\d.]+)',runtime_log)]
+            fast_ms=[float(v) for v in re.findall(r'\[FAST_TIMING\] update_ms=([\d.]+)',runtime_log)]
             diagnostics=dict(crashes=crashes,
                 slow_active_reports=runtime_log.count('belief=active'),
                 fast_only_reports=runtime_log.count('belief=fast_only'),
                 navigation_stall_fallbacks=runtime_log.count('[NAV2_STALL/'),
                 source_approach_confirmations=runtime_log.count('[SURFACE_CONFIRMED]'),
+                blocked_source_deferrals=runtime_log.count('[SURFACE_APPROACH_DEFERRED]'),
+                source_nav2_approaches=runtime_log.count('[SURFACE_APPROACH_NAV2]'),
+                fast_update_ms_max=max(fast_ms) if fast_ms else None,
                 planner_ms_max=max(plan_ms) if plan_ms else None)
             (out/'runtime_diagnostics.json').write_text(json.dumps(diagnostics,indent=2))
             if crashes:code=2

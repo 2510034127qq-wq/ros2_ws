@@ -82,7 +82,7 @@ from thermal_motion_controller.navigation_policy import (
 from thermal_motion_controller import clearance as clearance_mod
 from thermal_motion_controller.belief import detection_information
 from thermal_motion_controller.revisit import RevisitScheduler, RevisitParams
-from thermal_motion_controller.runtime_policy import slow_output_usable
+from thermal_motion_controller.runtime_policy import slow_output_usable,surface_approach_waypoint
 from thermal_motion_controller.gp_ucb import GaussianProcessUCB, GPParams
 from thermal_interfaces.msg import BeliefState
 from thermal_motion_controller.target_selection import (
@@ -476,33 +476,49 @@ class ControllerNode(Node):
         for name,default in [('sensor_model','a'),('slow_timeout_s',3.),
                              ('revisit_enabled',True),('revisit_stale_s',8.),('revisit_cooldown_s',15.),
                              ('revisit_max_consecutive',2),('residual_enabled',True),
+                             ('revisit_prediction_horizon_s',5.),('revisit_max_age_s',90.),
                              ('posterior_information_weight',1.),('surface_standoff_m',1.2),
+                             ('posterior_detection_probability',.85),('posterior_false_alarm_probability',.03),
+                             ('posterior_measurement_variance',.2),('surface_robot_radius_m',.35),
                              ('surface_approach_speed',.2),('surface_confirm_hold_s',1.),
+                             ('surface_approach_timeout_s',20.),('surface_retry_cooldown_s',20.),
                              ('surface_source_max_age_s',1.5),('thermal_image_width',64),
                              ('thermal_image_height',48),('thermal_fov_x_m',4.),('thermal_fov_y_m',3.),
                              ('clearance_calibrated',False),('clearance_amplitude_min_c',4.),
                              ('clearance_amplitude_prior_mean_c',15.),('clearance_evidence_memory_s',60.),
+                             ('clearance_detection_noise_c',1.),('clearance_detection_distance_scale_m',5.),
                              ('clearance_source_birth_rate_m2_s',.00001),('gp_max_samples',64),
-                             ('gp_max_candidates',256),('gp_length_scale_m',2.),('gp_beta',2.)]:
+                             ('gp_max_candidates',256),('gp_length_scale_m',2.),('gp_beta',2.),
+                             ('gp_signal_std_c',12.),('gp_noise_std_c',1.),('gp_travel_weight',.2)]:
             self.declare_parameter(name,default)
         self._sensor_model=str(g('sensor_model').value)
         self._slow_timeout=float(g('slow_timeout_s').value)
         self._slow_msg=None;self._slow_t=-float('inf')
         self._revisit=RevisitScheduler(RevisitParams(
             stale_s=float(g('revisit_stale_s').value),cooldown_s=float(g('revisit_cooldown_s').value),
-            max_consecutive=int(g('revisit_max_consecutive').value)))
+            max_consecutive=int(g('revisit_max_consecutive').value),
+            prediction_horizon_s=float(g('revisit_prediction_horizon_s').value),
+            max_age_s=float(g('revisit_max_age_s').value)))
         self._revisit_enabled=bool(g('revisit_enabled').value)
         self._residual_enabled=bool(g('residual_enabled').value)
         self._posterior_weight=float(g('posterior_information_weight').value)
+        self._posterior_pd=float(g('posterior_detection_probability').value)
+        self._posterior_pf=float(g('posterior_false_alarm_probability').value)
+        self._posterior_variance=float(g('posterior_measurement_variance').value)
         self._gp=GaussianProcessUCB(GPParams(max_samples=int(g('gp_max_samples').value),
             max_candidates=int(g('gp_max_candidates').value),length_scale_m=float(g('gp_length_scale_m').value),
-            beta=float(g('gp_beta').value)))
+            beta=float(g('gp_beta').value),signal_std_c=float(g('gp_signal_std_c').value),
+            noise_std_c=float(g('gp_noise_std_c').value),travel_weight=float(g('gp_travel_weight').value)))
         self._surface_standoff=float(g('surface_standoff_m').value)
         self._surface_speed=float(g('surface_approach_speed').value)
         self._surface_hold=float(g('surface_confirm_hold_s').value)
         self._surface_max_age=float(g('surface_source_max_age_s').value)
+        self._surface_robot_radius=float(g('surface_robot_radius_m').value)
         self._surface_seen_ids=set();self._surface_target_id=None;self._surface_hold_start=None
         self._surface_wp=None;self._surface_plan_t=-float('inf')
+        self._surface_nav_goal=None;self._surface_deferred={}
+        self._surface_approach_timeout=float(g('surface_approach_timeout_s').value)
+        self._surface_retry_cooldown=float(g('surface_retry_cooldown_s').value)
         self._source_registry={}
         self._clearance_params = clearance_mod.ClearanceParams(
             source_rate_per_m2=float(g('clearance_source_rate_per_m2').value),
@@ -512,6 +528,8 @@ class ControllerNode(Node):
             domain_radius_m=float(g('clearance_domain_radius_m').value),
         )
         self._clearance_params.amplitude_min_c=float(g('clearance_amplitude_min_c').value)
+        self._clearance_params.detection_noise_c=float(g('clearance_detection_noise_c').value)
+        self._clearance_params.detection_distance_scale_m=float(g('clearance_detection_distance_scale_m').value)
         self._clearance_params.amplitude_prior_mean_c=float(g('clearance_amplitude_prior_mean_c').value)
         self._clearance_params.evidence_memory_s=float(g('clearance_evidence_memory_s').value)
         self._clearance_params.source_birth_rate_m2_s=float(g('clearance_source_birth_rate_m2_s').value)
@@ -1391,18 +1409,32 @@ class ControllerNode(Node):
             p=float(c.existence_probability)
             covariance=np.array([[c.covariance_xx,c.covariance_xy],[c.covariance_xy,c.covariance_yy]])
             if not np.isfinite(covariance).all(): return None
-            entropy=detection_information(p,.85,.03)
-            localization=max(0.,.5*np.linalg.slogdet(np.eye(2)+covariance/.2)[1])
+            entropy=detection_information(p,self._posterior_pd,self._posterior_pf)
+            localization=max(0.,.5*np.linalg.slogdet(np.eye(2)+covariance/self._posterior_variance)[1])
             gain+=np.exp(-((x-c.position.x)**2+(y-c.position.y)**2)/
-                (2*self._residual_planner_footprint_radius**2))*(entropy+p*.85*localization)
+                (2*self._residual_planner_footprint_radius**2))*(entropy+p*self._posterior_pd*localization)
         return gain
 
     def _surface_timer(self,now):
         if self._state==STATE_DONE:
             self._pub.publish(Twist());return
+        if self._surface_nav_goal is not None:
+            key,gx,gy,started=self._surface_nav_goal
+            arrived=math.hypot(gx-self._wx,gy-self._wy)<.5 or self._nav2_state==NAV2_DONE
+            expired=now-started>self._surface_approach_timeout
+            stalled=self._nav2_progress_stalled(gx,gy,now,'surface_approach')
+            if arrived or expired or stalled:
+                self._cancel_nav2_goal();self._surface_nav_goal=None
+                if not arrived:
+                    self._surface_deferred[key]=now+self._surface_retry_cooldown
+                    self.get_logger().info(f'[SURFACE_APPROACH_DEFERRED] {key} navigation unavailable or stalled')
+            else:
+                if not self._send_nav2_goal(gx,gy):self._pub.publish(Twist())
+                return
         latency=now-self._tracker_sources_t
         sources=[t for t in self._tracker_sources if t.get('age_s',0)+latency<self._surface_max_age
-                 and t['probability']>.5 and t['id'] not in self._surface_seen_ids]
+                 and t['probability']>.5 and t['id'] not in self._surface_seen_ids
+                 and now>=self._surface_deferred.get(t['id'],-float('inf'))]
         if sources:
             target=min(sources,key=lambda t:math.hypot(t['x']-self._wx,t['y']-self._wy))
             self._cancel_nav2_goal()
@@ -1428,6 +1460,17 @@ class ControllerNode(Node):
             lin,ang=self._drive_toward_yaw(yaw,min(self._surface_speed,max(0.,distance-self._surface_standoff)))
             if abs(error)>.5: lin=0.
             guarded,_,_,_=self._direct_guarded_cmd(gx,gy,lin,now,'surface_approach')
+            if lin>0. and guarded<=0. and abs(error)<.5:
+                waypoint=surface_approach_waypoint((self._wx,self._wy),(target['x'],target['y']),
+                    self._surface_standoff,self._occ_view,self._surface_robot_radius)
+                if waypoint is not None:
+                    self._surface_nav_goal=(target['id'],*waypoint,now)
+                    self.get_logger().info(f'[SURFACE_APPROACH_NAV2] {target["id"]} waypoint={waypoint}')
+                else:
+                    self._surface_deferred[target['id']]=now+self._surface_retry_cooldown
+                    self._surface_wp=None
+                    self.get_logger().info(f'[SURFACE_APPROACH_DEFERRED] {target["id"]} no known-free standoff')
+                self._pub.publish(Twist());return
             lin=min(lin,guarded)
             self._pub.publish(self._make_cmd(lin,ang))
             return

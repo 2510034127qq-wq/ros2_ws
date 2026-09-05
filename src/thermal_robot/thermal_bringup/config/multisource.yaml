@@ -33,6 +33,7 @@ thermal_mapper_node:
     projection_near_m: 0.15
     projection_far_m: 15.0
     pose_from_tf: false
+    sector_memory_s: 60.0
 source_tracker_node:
   ros__parameters:
     update_rate: 2.0
@@ -41,6 +42,7 @@ source_tracker_node:
     association_gate_chi2: 9.21
     max_tracks: 32
     slow_prior_enabled: true
+    slow_timeout_s: 3.0
 belief_node:
   ros__parameters:
     mode: online
@@ -75,11 +77,20 @@ controller_node:
     revisit_stale_s: 8.0
     revisit_cooldown_s: 15.0
     revisit_max_consecutive: 2
+    revisit_prediction_horizon_s: 5.0
+    revisit_max_age_s: 90.0
     residual_enabled: true
     posterior_information_weight: 1.0
+    # Keep these observation assumptions aligned with belief_node when tuning.
+    posterior_detection_probability: 0.85
+    posterior_false_alarm_probability: 0.03
+    posterior_measurement_variance: 0.2
     surface_standoff_m: 1.2
+    surface_robot_radius_m: 0.35
     surface_approach_speed: 0.2
     surface_confirm_hold_s: 1.0
+    surface_approach_timeout_s: 20.0
+    surface_retry_cooldown_s: 20.0
     surface_source_max_age_s: 1.5
     thermal_image_width: 64
     thermal_image_height: 48
@@ -89,9 +100,14 @@ controller_node:
     clearance_terminate: false
     clearance_amplitude_min_c: 4.0
     clearance_amplitude_prior_mean_c: 15.0
+    clearance_detection_noise_c: 1.0
+    clearance_detection_distance_scale_m: 5.0
     clearance_evidence_memory_s: 60.0
     clearance_source_birth_rate_m2_s: 0.00001
     gp_max_samples: 64
     gp_max_candidates: 256
     gp_length_scale_m: 2.0
     gp_beta: 2.0
+    gp_signal_std_c: 12.0
+    gp_noise_std_c: 1.0
+    gp_travel_weight: 0.2

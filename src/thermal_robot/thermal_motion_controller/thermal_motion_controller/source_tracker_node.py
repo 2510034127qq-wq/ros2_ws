@@ -90,6 +90,7 @@ class SourceTrackerNode(Node):
         if self._tracker.motion_model == 'kalman' and now_s-self._last_update < self._update_period:
             return
         self._last_update = now_s
+        started=time.perf_counter()
         temp = np.asarray(msg.temperature_mean, dtype=np.float32).reshape((msg.height, msg.width))
         conf = np.asarray(msg.confidence, dtype=np.float32).reshape((msg.height, msg.width))
         age = np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape((msg.height, msg.width))
@@ -102,6 +103,7 @@ class SourceTrackerNode(Node):
         for track in sorted(tracks, key=lambda t: (t.status != 'confirmed', -t.existence_probability)):
             out.sources.append(self._to_msg(msg.header, track))
         self._pub.publish(out)
+        self.get_logger().info(f'[FAST_TIMING] update_ms={(time.perf_counter()-started)*1000:.3f}')
         self._log_status(tracks, now_s)
 
     def _to_msg(self, header, track: TrackedSource) -> SourceEstimate:

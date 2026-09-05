@@ -335,7 +335,8 @@ def generate_launch_description():
                 output='both',
             ),
             Node(package='thermal_motion_controller',executable='belief_node',name='belief_node',
-                 parameters=[software_params,{'use_sim_time':use_sim_t,'mode':belief_mode}],output='both'),
+                 parameters=[software_params,{'use_sim_time':use_sim_t,
+                     'mode':ParameterValue(belief_mode,value_type=str)}],output='both'),
             # controller_node v30: 热导航决策层
             # - FINE 模式（ASCENT/CONVERGE/SAMPLE）: 直接发布 /cmd_vel
             # - COARSE 模式（DEPARTURE/COARSE_SURVEY/FRONTIER）: NavigateToPose Action

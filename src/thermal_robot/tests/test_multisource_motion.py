@@ -71,6 +71,16 @@ def test_belief_residual_birth_and_transactional_budget():
     assert b.stamp_s==stamp and b.health=='over_budget'
 
 
+def test_invalid_slow_observation_preserves_last_good_posterior():
+    b=SourceBelief(BeliefParams(budget_ms=1000))
+    assert b.update([det(1.)],1.)
+    before=b.clusters[0].motion.state.copy()
+    assert not b.update([det(float('nan'))],2.)
+    assert b.health=='invalid:ValueError' and b.stamp_s==1.
+    assert np.array_equal(before,b.clusters[0].motion.state)
+    assert b.update([det(1.2)],3.) and b.health=='ready'
+
+
 def test_belief_split_birth_does_not_erase_parent():
     b=SourceBelief(BeliefParams(budget_ms=1000))
     for t in range(6): b.update([det(0)],float(t))
@@ -129,6 +139,18 @@ def test_dynamic_clearance_evidence_ages_and_candidate_probability_counts():
     assert stale<fresh and candidate==pytest.approx(.2*fresh)
 
 
+def test_clearance_conditions_all_sector_misses_on_one_source_amplitude():
+    from thermal_motion_controller.clearance import ClearanceParams,clearance_with_history
+    p=ClearanceParams(source_rate_per_m2=1.,amplitude_prior_mean_c=4.,source_birth_rate_m2_s=0.)
+    _,mass=clearance_with_history(np.array([[2]]),np.array([[15]],dtype=np.uint8),
+        np.array([[0.]]),1.,p,detection_distance_m=np.array([[8.]]))
+    rng=np.random.default_rng(13)
+    amplitude=4.+rng.exponential(4.,200000)
+    detection=.7/(1+np.exp(-(amplitude/(1+(8/5)**2)-4.)))
+    missed=(rng.random((len(amplitude),4))>=detection[:,None]).all(axis=1)
+    assert mass==pytest.approx(missed.mean(),abs=.006)
+
+
 def test_belief_field_fit_infers_amplitude_and_scale():
     y,x=np.indices((41,41));wx=(x+.5)*.25;wy=(y+.5)*.25
     temp=22+30*np.exp(-((wx-5)**2+(wy-5)**2)/(2*1.2**2))
@@ -156,3 +178,48 @@ def test_belief_field_fit_infers_amplitude_and_scale():
 def test_slow_policy_blocks_stale_faulty_and_baseline_feedback(strategy,mode,health,stamp,now,receipt,expected):
     from thermal_motion_controller.runtime_policy import slow_output_usable
     assert slow_output_usable(strategy,mode,health,stamp,now,receipt)==expected
+
+
+def test_surface_approach_selects_free_footprint_and_rejects_unknown_space():
+    from thermal_motion_controller.runtime_policy import surface_approach_waypoint
+    from thermal_field_reconstructor.visibility import OccupancyView,known_free_at
+    grid=np.zeros((60,60),dtype=np.int16)
+    grid[:,20:23]=100
+    view=OccupancyView(-3.,-3.,.1,grid)
+    target=surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view)
+    assert target is not None and known_free_at(view,np.array([target[0]]),np.array([target[1]]))[0]
+    assert np.linalg.norm(target)==pytest.approx(1.2)
+    grid[:]=-1
+    assert surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view) is None
+
+
+def test_merge_requires_persistent_overlap_and_preserves_confirmed_identities():
+    from thermal_motion_controller.belief import SourceCluster
+    from thermal_motion_controller.motion_filter import MotionFilter
+    b=SourceBelief(BeliefParams(merge_hits=3))
+    b.clusters=[SourceCluster(str(i),MotionFilter(np.array([x,0.,0.,0.])),.4,20.,.6,0.)
+                for i,x in enumerate((0.,.2))]
+    b._merge();b._merge()
+    assert len(b.clusters)==2
+    b._merge()
+    assert len(b.clusters)==1 and b.events[-1]['kind']=='merge'
+    assert np.linalg.eigvalsh(b.clusters[0].motion.covariance).min()>0
+    other=SourceCluster('other',MotionFilter(np.array([.1,0.,0.,0.])),.99,20.,.6,0.,confirmed=True)
+    b.clusters[0].confirmed=True;b.clusters.append(other)
+    for _ in range(5):b._merge()
+    assert len(b.clusters)==2
+
+
+def test_five_moving_sources_with_late_birth_death_and_rebirth():
+    b=SourceBelief(BeliefParams(budget_ms=1000,survival_time_s=1000))
+    events=[]
+    for t in range(30):
+        detections=[det(5*i+.1*t,2.*(i%2),20.+i) for i in range(5)
+                    if not (i==4 and t<5) and not (i==0 and 12<=t<21)]
+        assert b.update(detections,float(t),lambda x,y:1.)
+        events.extend(e['kind'] for e in b.events)
+        assert len(b.clusters)<=5
+        assert np.isfinite(b.cardinality()).all() and b.cardinality().sum()==pytest.approx(1.)
+    assert np.argmax(b.cardinality())==5 and b.cardinality()[5]>.95
+    assert events.count('birth')==6 and 'death' in events
+    assert all(c.motion.state[2]==pytest.approx(.1,abs=.04) for c in b.clusters)

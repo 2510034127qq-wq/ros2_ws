@@ -23,7 +23,8 @@ class Probe(Node):
         self.out=out;self.counts=collections.Counter();self.health=collections.Counter()
         self.sources=set();self.belief_sources=set();self.cpu=[];self.rows=[];self.positions=[]
         self.max_hot=None;self.max_clear=0;self.nonzero_cmd=0;self.valid_depth=0
-        self.snapshots={};self.source_rows=[];self.truth=[];self.truth_rows=[]
+        self.snapshots={};self.source_rows=[];self.truth=[];self.truth_rows=[];self.physical_truth=[]
+        self.fresh_location_errors=[];self.inactive_confirmations=0
         self.truth_errors=[];self.last_received={};self.start=time.monotonic()
         self.commands=[];self.yaws=[]
         self.body_errors=[];self.body_failures=[];self.body_index=0;self.body_pending=None
@@ -76,12 +77,20 @@ class Probe(Node):
             self.sources.update(s.id for s in msg.sources if s.status=='confirmed')
             for s in msg.sources:self.source_rows.append(dict(t=time.monotonic(),id=s.id,status=s.status,
                 x=s.position.x,y=s.position.y,vx=s.velocity.x,vy=s.velocity.y,p=s.existence_probability,
-                age=s.age_s,reacquisitions=s.reacquisitions))
+                age=s.age_s,reacquisitions=s.reacquisitions,last_reacquisition_gap_s=s.last_reacquisition_s))
             for s in msg.sources:
                 if s.status=='confirmed' and self.truth:
                     self.truth_errors.append(min(np.hypot(s.position.x-t.position.x,
                         s.position.y-t.position.y) for t in self.truth))
+                if s.status=='confirmed' and self.physical_truth:
+                    nearest=min(self.physical_truth,key=lambda t:np.hypot(s.position.x-t.position.x,
+                                                                                  s.position.y-t.position.y))
+                    self.inactive_confirmations+=int(nearest.status!='truth_active')
+                    if s.age_s<=1.5:
+                        self.fresh_location_errors.append(float(np.hypot(s.position.x-nearest.position.x,
+                                                                         s.position.y-nearest.position.y)))
         elif name=='truth':
+            self.physical_truth=msg.sources
             self.truth=[s for s in msg.sources if s.status=='truth_active']
             self.truth_rows.append(dict(t=time.monotonic(),sources=[dict(id=s.id,
                 x=s.position.x,y=s.position.y,status=s.status) for s in msg.sources]))
@@ -94,7 +103,8 @@ class Probe(Node):
             self.commands.append((time.monotonic(),msg.linear.x,msg.angular.z))
 
     def save(self,args):
-        required=['raw','filtered','field','gradient','map','sources','odom','scan','cmd_vel','clearance']
+        required=['raw','filtered','field','gradient','map','sources','odom','scan','cmd_vel']
+        if args.strategy in ('residual','fast','dual','gp_ucb'):required+=['clearance']
         if args.sensor_model=='b':required+=['depth']
         if args.belief_mode!='off':required+=['belief']
         failures=[f'missing:{name}' for name in required if self.counts[name]==0]
@@ -119,14 +129,16 @@ class Probe(Node):
                     confirmed_ids=sorted(self.sources),belief_ids=sorted(self.belief_sources),
                     belief_compute_ms_p99=float(np.percentile(self.cpu,99)) if self.cpu else None,
                     path_length_m=distance,nonzero_commands=self.nonzero_cmd,max_temperature_c=self.max_hot,
-                    sensor_model=args.sensor_model,belief_mode=args.belief_mode,
+                    sensor_model=args.sensor_model,strategy=args.strategy,belief_mode=args.belief_mode,
                     expected_health=args.expected_health,
                     yaw_range_rad=float(np.ptp(np.unwrap(self.yaws))) if self.yaws else 0.,
                     physical_geometry_samples=len(self.body_errors),
                     physical_geometry_error_max_m=max(self.body_errors) if self.body_errors else None,
                     confirmed_nearest_truth_error_p95_m=float(np.percentile(self.truth_errors,95)) if self.truth_errors else None,
                     confirmed_nearest_truth_error_max_m=float(max(self.truth_errors)) if self.truth_errors else None,
-                    note='Nearest truth distance is a diagnostic, not matched precision or recall.')
+                    fresh_nearest_physical_source_error_p95_m=float(np.percentile(self.fresh_location_errors,95)) if self.fresh_location_errors else None,
+                    confirmed_inactive_nearest_frames=self.inactive_confirmations,
+                    note='Active truth distance includes predicted tracks after emission stops. Physical source distance includes inactive bodies. Neither is matched precision or recall.')
         (self.out/'probe.json').write_text(json.dumps(report,indent=2))
         (self.out/'belief.json').write_text(json.dumps(self.rows,indent=2))
         (self.out/'sources.json').write_text(json.dumps(self.source_rows,indent=2))
@@ -142,6 +154,7 @@ def main():
     parser.add_argument('--duration',type=float,default=60.)
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--sensor-model',choices=['a','b'],default='a')
+    parser.add_argument('--strategy',choices=['full','frontier','levy','residual','fast','dual','gp_ucb'],default='dual')
     parser.add_argument('--belief-mode',choices=['online','shadow','off'],default='online')
     parser.add_argument('--expected-health',default='ready')
     parser.add_argument('--min-path-m',type=float,default=.5)

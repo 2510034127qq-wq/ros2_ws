@@ -22,6 +22,7 @@ class ClearanceParams:
     amplitude_min_c: float = 4.0
     amplitude_prior_mean_c: float = 15.0
     detection_noise_c: float = 1.0
+    detection_distance_scale_m: float = 5.0
     evidence_memory_s: float = 60.0
     source_birth_rate_m2_s: float = 0.00001
 
@@ -92,14 +93,16 @@ def clearance_with_history(view_state, view_sectors, age_s, cell_area_m2,
     distances=np.ones(vs.shape) if detection_distance_m is None else np.asarray(detection_distance_m)
     amplitudes=params.amplitude_min_c + params.amplitude_prior_mean_c*(-np.log(
         1-(np.arange(16)+.5)/16))
-    attenuation=1/(1+(distances/5.)**2)
-    p_detect=np.zeros(vs.shape,dtype=float)
+    attenuation=1/(1+(distances/max(params.detection_distance_scale_m,.01))**2)
+    sectors=np.minimum(_popcount8(view_sectors),params.max_effective_sectors)
+    miss=np.zeros(vs.shape,dtype=float)
     for amplitude in amplitudes:
         x=(amplitude*attenuation-params.amplitude_min_c)/max(params.detection_noise_c,.01)
-        p_detect += 1/(1+np.exp(-np.clip(x,-60,60)))/len(amplitudes)
-    p_detect *= params.p_detect_per_sector
-    sectors=np.minimum(_popcount8(view_sectors),params.max_effective_sectors)
-    miss=np.where(vs==VIEW_CLEAR,(1-p_detect)**sectors,1.)
+        pd=params.p_detect_per_sector/(1+np.exp(-np.clip(x,-60,60)))
+        # A source shares one unknown amplitude across sectors. Integrate the
+        # joint miss likelihood, not the product of marginal detection means.
+        miss += (1-pd)**sectors/len(amplitudes)
+    miss=np.where(vs==VIEW_CLEAR,miss,1.)
     retention=np.exp(-age/max(params.evidence_memory_s,.01))
     miss=1-(1-miss)*retention
     if residual is not None: miss=np.where(np.asarray(residual)>=params.residual_block_thresh,1.,miss)
