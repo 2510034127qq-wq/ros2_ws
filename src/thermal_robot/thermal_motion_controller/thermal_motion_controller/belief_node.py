@@ -32,7 +32,7 @@ class BeliefNode(Node):
             min_temp_rise=float(self.get_parameter('residual_birth_threshold').value),
             merge_radius_m=float(self.get_parameter('detection_merge_m').value),
             max_detection_age_s=self.freshness,max_detections=self.params.max_sources)
-        self.extractor.motion_model="kalman"
+        self.extractor.estimator_model="kalman"
         self.latest=None; self.last_stamp=None; self.revision=0
         self.create_subscription(ThermalMap,'/thermal/map',self._map,3)
         self.pub=self.create_publisher(BeliefState,'/thermal/belief',3)
@@ -59,7 +59,7 @@ class BeliefNode(Node):
             self.extractor.measurement_type=msg.measurement_type or "field_direct"
             detections=self.extractor.extract_detections(temp,conf,*kwargs)
             # Residual birth proposals only remove established cluster evidence.
-            sources=[(*c.motion.state[:2],c.amplitude,c.sigma) for c in self.belief.clusters
+            sources=[(*c.position.state[:2],c.amplitude,c.sigma) for c in self.belief.clusters
                      if c.confirmed]
             predicted=predict_field(msg.width,msg.height,msg.resolution,msg.origin_x,msg.origin_y,
                                     self.ambient,sources)
@@ -86,10 +86,9 @@ class BeliefNode(Node):
                     s=SourceEstimate();s.header=msg.header;s.id=c.label
                     s.status='confirmed' if c.confirmed else 'candidate'
                     if stamp-c.last_seen_s>self.freshness: s.status='stale' if c.confirmed else 'candidate'
-                    s.position.x,s.position.y=map(float,c.motion.state[:2])
-                    s.velocity.x,s.velocity.y=map(float,c.motion.state[2:])
-                    s.covariance_xx=float(c.motion.covariance[0,0]);s.covariance_xy=float(c.motion.covariance[0,1])
-                    s.covariance_yy=float(c.motion.covariance[1,1]);s.velocity_variance=float(np.trace(c.motion.covariance[2:,2:]))
+                    s.position.x,s.position.y=map(float,c.position.state[:2])
+                    s.covariance_xx=float(c.position.covariance[0,0]);s.covariance_xy=float(c.position.covariance[0,1])
+                    s.covariance_yy=float(c.position.covariance[1,1])
                     s.strength=float(c.amplitude);s.sigma=float(c.sigma)
                     s.existence_probability=float(c.probability);s.confidence=float(c.probability)
                     s.observations=c.hits;s.age_s=float(stamp-c.last_seen_s)

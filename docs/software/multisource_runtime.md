@@ -1,6 +1,6 @@
 # 多热源软件运行与 UGV 接入
 
-本轮交付范围以 `docs/superpowers/plans/2026-09-05-software-completion.md` 为准。原总体设计保留为研究背景。软件功能验证与论文统计门槛分开：本轮不要求全矩阵显著优势、两周影子期或真实硬件成绩。
+当前执行范围以 [2026-09-06 静态持续热源巡检规划](../superpowers/specs/2026-09-06-static-thermal-inspection-design.md) 为准。精简代码：删除移动、生灭事件和自动判断搜完的专用实现；有助于基础能力的观测、去重、地图融合、规划和慢层保留。历史动态研究与验证不代表当前静态任务已达标。
 
 ## 策略与观测
 
@@ -10,7 +10,7 @@
 
 | 参数 | 值 | 行为 |
 |---|---|---|
-| `strategy` | `fast` | Kalman 快层、残差探索、预测重访 |
+| `strategy` | `fast` | 二维 Kalman 快层、残差探索 |
 | | `dual`（默认） | 快层加可用的慢层后验；慢层不可用时走快层 |
 | | `gp_ucb` | 有界 GP-UCB 对照规划 |
 | | `full/frontier/levy/residual` | 保留原策略入口 |
@@ -26,22 +26,22 @@ ros2 launch thermal_bringup sim_nav_slam_launch.py \
   use_rviz:=false use_gzclient:=false strategy:=dual sensor_model:=b
 ```
 
-B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时 world 中加入热源对应的盒体或柱体。前视热图通过最近表面射线交点生成；深度为 optical-z 米。源生灭改变表面发热，物体本身仍存在；动态源同时更新热表面位置及 Gazebo 物体位置。指定发热面由 `surface_hot_faces` 控制，`[-1]` 为全部表面。盒体面编号依次是 -x/+x/-y/+y/-z/+z，柱体为侧面/底面/顶面。
+B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时 world 中加入热源对应的盒体或柱体。前视热图通过最近表面射线交点生成；深度为 optical-z 米。目标固定位置、持续发热；动态场景生成和实体移动同步已删除。指定发热面由 `surface_hot_faces` 控制，`[-1]` 为全部表面。盒体面编号依次是 -x/+x/-y/+y/-z/+z，柱体为侧面/底面/顶面。
 
 温度扰动参数包括噪声、偏置、漂移、emissivity 和深度噪声/失效。辐射采用灰体 T^4 混合近似；不宣称是完整 LWIR 光谱、热传导或反射模拟。算法只接收热图、深度、CameraInfo、里程计和 SLAM 地图，`/sim/thermal_sources_truth` 仅供评测。
 
 ## 快慢层
 
-- 快层：常速 Gaussian filter、一对一预测关联、stale 预测和重捕获统计；默认 2 Hz。关联使用含协方差归一化项的高斯似然，避免不确定的旧轨迹抢占当前轨迹的观测。失去观测前 5 秒保持常速，之后速度按 2 秒时间常数衰减，限制表面质心抖动造成的长期漂移。位置发布的是当前预测位置，`age_s` 单独表示离上次检测多久。
-- 当前冷观测可以降低旧热源存在概率；要求预测中心和邻域确实获得新观测且没有热支持。未观测、过期、遮挡不能当作冷证据，重复缓存帧也不会重复计数。被反证的轨迹重新发热后需要再次确认；低概率旧轨迹不再占用重访优先级或排除探索区域。
+- 快层默认 2 Hz：二维位置 Gaussian filter、一对一关联、多帧确认。位置在缺测时保持不变，协方差允许地图/配准漂移。关联保留协方差归一化项和实测位置门控，防止不确定的旧标签抢占新观测。
+- 当前冷观测可以降低错误热点假设的置信度；中心和邻域必须获得新观测且没有热支持。未观测、过期和遮挡不等于冷证据，重复缓存帧不重复计数。被反证的假设需要多帧重新确认。
 - B 级控制在启动、移动 4 米或上次扫描完成 60 秒后进行一周相机转向扫描，完成条件使用里程计累计转角。探索目标到达半径为 0.6 米，正常推进时保持目标；持续 12 秒无位移或 45 秒超时会重选，并临时排除失败目标附近 2 米。地图尚未准备好时等待/扫描，不发起长距离随机退路。参数均在 `multisource.yaml`，需要按底盘和场景调整。
-- 慢层：每个带标签源簇承载运动条件高斯、强度/尺度估计与 Bernoulli 存在概率。源数分布由 Bernoulli 卷积得到。残差支持 birth/split birth，当前可见区域的漏检支持 death；遮挡仅降低长期生存先验。关联采用有门控的近似匹配，非精确联合多目标后验。
-- 已确认且具有不同身份的源不因一次近距离交叉而合并；未充分支持的重叠簇需持续 merge 证据。
+- 慢层保留带标签的位置高斯、强度/尺度与存在置信度，源数分布由 Bernoulli 卷积得到。残差支持新候选，当前可见却未检测到的证据用于清理错误候选；遮挡只让置信度老化。关联仍是有门控的近似匹配，非精确联合后验。
+- 未充分支持的重叠候选需持续证据才合并；不同已确认标签不因一次接近而合并。删除速度条件、运动外推和生灭事件记录。
 - 慢层独立进程，发布 `/thermal/belief` 的 health、revision、compute_ms、cardinality_pmf。失败/超预算不输出可用新估计；控制器按健康状态及时间戳拒绝过期后验。
 - online 模式将期望存在性熵降与定位信息收益用于选点，并通过保守协方差交集给快层先验校正。shadow 不影响规划或快层；off 时快层独立运行。
 - `fast` 和 `gp_ucb` 不接受慢层先验，即使慢层仍在 online 估计。`belief_mode` 是启动选项，切换模式时重新启动覆盖层。`off` 在 launch 中显式按字符串传递。
 - 新控制路径按世界坐标接近源并保持停靠距离；直达被挡时尝试已知空闲停靠点与 Nav2 绕行，无可用停靠点或导航停滞时暂缓该源并继续探索，冷却后可重试。Nav2 探索停滞有原有受扫描保护的直接控制回退。
-- 清场概率使用空间 Poisson、幅值先验、扇区漏检及历史衰减，双层另计尚未确认源簇。`clearance_calibrated: false`，默认仅输出，不自动停机。只有用户有标定证据并明确启用时才可用清场触发 DONE。
+- 预测重访和搜完概率模块已删除，也不按预设源数或“很久没找到新源”自动结束。雷达避障间距、相机扫描、失败点冷却仍保留。
 
 ## UGV 与 Lepton/PT3
 
@@ -94,10 +94,8 @@ python3 src/thermal_robot/scripts/plot_software_validation.py \
   bags/software_validation/my_b_dual --out /tmp/b_dual.png
 ```
 
-`SourceEstimate` 新增速度、观测年龄、速度方差及重捕获计数；`last_reacquisition_s` 表示该次重捕获前的无检测间隔。`GradientArray` 新增图像尺寸；`ThermalMap` 新增测量类型与最近观测距离；新增 `BeliefState`。升级后应重新构建接口包和全部依赖包，外部消费者也需更新。旧 bag 中自定义派生消息与新定义不保证兼容；优先回放原始热图、深度与 TF，重新计算派生结果。
+`SourceEstimate` 保留位置、协方差、强度、确认状态和 `age_s`，删除速度、速度方差、重捕获计数与间隔。重新构建接口包和所有依赖；外部消费者需要更新，旧派生消息 bag 不保证兼容。优先回放原始热图、深度和 TF。
 
-消融可复制 `multisource.yaml` 后改 `revisit_enabled`、`residual_enabled`、mapper 的 `visibility_enabled`，再用 `software_params` 传入；比较 fast/dual 或 shadow/off 可隔离慢层作用。B 级图像的物理遮挡不应因“去算法可见性”而消失。
+静态对照可固定场景、seed 和预算，比较 fast/dual 或 online/shadow/off；也可通过 `software_params` 改 `residual_enabled` 或 mapper 的 `visibility_enabled`。B 级物理遮挡不因关闭算法可见性而消失。`posterior_*` 假设应与 `belief_node` 参数保持一致。
 
-去残差、去重访、去算法可见性时建议先固定 `strategy:=fast`，逐项改变参数；慢层消融使用相同场景和 seed 对比 fast/dual 或 online/shadow/off。`posterior_*` 的观测假设调整时应与 `belief_node` 对应参数保持一致。
-
-当前交付证据和已知限制见 [软件交付审计](software_completion_audit.md)。
+当前精简与实测证据见 [精简验证记录](../devlog/2026-09-06-static-inspection-simplification.md)。[旧软件交付审计](software_completion_audit.md) 仅对应精简前版本。

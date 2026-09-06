@@ -37,12 +37,10 @@ thermal_mapper_node:
 source_tracker_node:
   ros__parameters:
     update_rate: 2.0
-    acceleration_std: 0.4
+    position_noise_std: 0.05
     measurement_variance: 0.15
     association_gate_chi2: 9.21
-    association_memory_horizon_s: 5.0
     cold_evidence_decay_s: 2.0
-    lost_velocity_decay_s: 2.0
     max_tracks: 32
     slow_prior_enabled: true
     slow_timeout_s: 3.0
@@ -55,19 +53,18 @@ belief_node:
     residual_birth_threshold: 3.0
     detection_merge_m: 0.5
     max_sources: 16
-    acceleration_std: 0.35
+    position_noise_std: 0.05
     measurement_variance: 0.2
     gate_chi2: 9.21
     gate_m: 3.0
-    survival_time_s: 180.0
+    confidence_memory_s: 180.0
     p_detection: 0.85
     false_alarm_probability: 0.03
-    birth_probability: 0.15
-    death_probability: 0.025
+    candidate_probability: 0.15
+    prune_probability: 0.025
     confirm_probability: 0.90
-    birth_hits: 3
+    confirm_hits: 3
     merge_distance_m: 0.45
-    merge_velocity_m_s: 0.2
     merge_hits: 3
     budget_ms: 100.0
     field_fit_radius_m: 3.0
@@ -76,13 +73,6 @@ belief_node:
 controller_node:
   ros__parameters:
     slow_timeout_s: 3.0
-    revisit_enabled: true
-    revisit_stale_s: 8.0
-    revisit_cooldown_s: 15.0
-    revisit_max_consecutive: 2
-    revisit_prediction_horizon_s: 5.0
-    revisit_max_age_s: 90.0
-    revisit_min_probability: 0.25
     residual_enabled: true
     posterior_information_weight: 1.0
     # Keep these observation assumptions aligned with belief_node when tuning.
@@ -110,14 +100,6 @@ controller_node:
     thermal_image_height: 48
     thermal_fov_x_m: 4.0
     thermal_fov_y_m: 3.0
-    clearance_calibrated: false
-    clearance_terminate: false
-    clearance_amplitude_min_c: 4.0
-    clearance_amplitude_prior_mean_c: 15.0
-    clearance_detection_noise_c: 1.0
-    clearance_detection_distance_scale_m: 5.0
-    clearance_evidence_memory_s: 60.0
-    clearance_source_birth_rate_m2_s: 0.00001
     gp_max_samples: 64
     gp_max_candidates: 256
     gp_length_scale_m: 2.0

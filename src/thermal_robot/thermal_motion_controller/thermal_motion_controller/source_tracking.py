@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .motion_filter import MotionFilter, associate
+from .position_filter import PositionFilter, associate
 
 
 STATUS_CANDIDATE = "candidate"
@@ -44,10 +44,6 @@ class TrackedSource:
     status: str = STATUS_CANDIDATE
     consecutive_observations: int = 1
     ever_confirmed: bool = False
-    vx: float = 0.0
-    vy: float = 0.0
-    reacquisitions: int = 0
-    last_reacquisition_s: float = 0.0
     first_confirmed_s: float = -1.0
 
 
@@ -71,14 +67,12 @@ class SourceTrackerCore:
         duplicate_memory_s: float = 60.0,
         update_alpha_min: float = 0.08,
         max_detection_age_s: float = float("inf"),
-        motion_model: str = "legacy",
-        acceleration_std: float = 0.4,
+        estimator_model: str = "legacy",
+        position_noise_std: float = 0.05,
         measurement_variance: float = 0.15,
         association_gate_chi2: float = 9.21,
         max_tracks: int = 32,
-        association_memory_horizon_s: float = 5.0,
         cold_evidence_decay_s: float = 2.0,
-        lost_velocity_decay_s: float = 2.0,
     ):
         self.ambient_temp = float(ambient_temp)
         self.min_temp_rise = float(min_temp_rise)
@@ -95,21 +89,19 @@ class SourceTrackerCore:
         self.duplicate_memory_s = float(duplicate_memory_s)
         self.update_alpha_min = max(0.0, min(0.6, float(update_alpha_min)))
         self.max_detection_age_s = float(max_detection_age_s)
-        if motion_model not in ("legacy", "kalman"):
-            raise ValueError("motion_model must be legacy or kalman")
-        self.motion_model = motion_model
-        self.acceleration_std = float(acceleration_std)
+        if estimator_model not in ("legacy", "kalman"):
+            raise ValueError("estimator_model must be legacy or kalman")
+        self.estimator_model = estimator_model
+        self.position_noise_std = float(position_noise_std)
         self.measurement_variance = float(measurement_variance)
         self.association_gate_chi2 = float(association_gate_chi2)
         self.max_tracks = int(max_tracks)
-        self.association_memory_horizon_s = float(association_memory_horizon_s)
         self.cold_evidence_decay_s = max(.1, float(cold_evidence_decay_s))
-        self.lost_velocity_decay_s = max(.1, float(lost_velocity_decay_s))
         self._anchors = {}
         self._cold_stamps = {}
         self.measurement_type = "field_direct"
         self._filters = {}
-        self._last_motion_s = None
+        self._last_filter_s = None
         self._tracks: Dict[str, TrackedSource] = {}
         self._next_id = 1
 
@@ -126,8 +118,8 @@ class SourceTrackerCore:
         origin_y: float,
         last_seen_age_s: Optional[np.ndarray] = None,
     ) -> List[SourceDetection]:
-        if self.motion_model=='kalman':
-            return self._extract_motion_detections(temperature_mean,confidence,resolution,
+        if self.estimator_model=='kalman':
+            return self._extract_components(temperature_mean,confidence,resolution,
                 origin_x,origin_y,last_seen_age_s)
         temp = np.asarray(temperature_mean, dtype=np.float32)
         conf = np.asarray(confidence, dtype=np.float32)
@@ -179,8 +171,8 @@ class SourceTrackerCore:
         return detections
 
     def update(self, detections: Sequence[SourceDetection], now_s: float) -> List[TrackedSource]:
-        if self.motion_model == "kalman":
-            return self._update_motion(detections, now_s)
+        if self.estimator_model == "kalman":
+            return self._update_filtered(detections, now_s)
         updated_ids = set()
         for det in sorted(detections, key=lambda d: d.confidence * d.strength, reverse=True):
             track = self._nearest_track(det)
@@ -224,9 +216,9 @@ class SourceTrackerCore:
     ) -> List[TrackedSource]:
         detections = self.extract_detections(
             temperature_mean, confidence, resolution, origin_x, origin_y, last_seen_age_s)
-        previous = self._last_motion_s
+        previous = self._last_filter_s
         tracks = self.update(detections, now_s)
-        if self.motion_model == 'kalman' and (previous is None or now_s > previous):
+        if self.estimator_model == 'kalman' and (previous is None or now_s > previous):
             self._apply_cold_evidence(temperature_mean, confidence, last_seen_age_s,
                                       resolution, origin_x, origin_y, now_s)
         return tracks
@@ -417,32 +409,21 @@ class SourceTrackerCore:
                 track.status = STATUS_SUPPRESSED
                 track.existence_probability = min(track.existence_probability, 0.05)
 
-    def _update_motion(self, detections, now_s):
-        if self._last_motion_s is not None and now_s <= self._last_motion_s:
+    def _update_filtered(self, detections, now_s):
+        if self._last_filter_s is not None and now_s <= self._last_filter_s:
             return self.tracks
-        self._last_motion_s = float(now_s)
+        self._last_filter_s = float(now_s)
         detections = [d for d in detections if np.isfinite(
             [d.x, d.y, d.strength, d.confidence, d.sigma]).all() and d.confidence > 0]
         live = [t for t in self.tracks if t.status != STATUS_SUPPRESSED]
         for tr in live:
-            filt = self._filters[tr.track_id]
-            coast_until = tr.last_seen_s+self.association_memory_horizon_s
-            if filt.stamp_s < coast_until < now_s:
-                filt.predict(coast_until, self.acceleration_std)
-            decay = self.lost_velocity_decay_s if now_s > coast_until else None
-            # Short occlusions keep constant velocity. Beyond the coasting
-            # horizon, surface-centroid jitter must not drift across the map.
-            filt.predict(now_s, self.acceleration_std, velocity_decay_s=decay)
+            self._filters[tr.track_id].predict(now_s, self.position_noise_std)
         def allowed(i, j):
             tr, det = live[i], detections[j]
             anchor = self._anchors.get(tr.track_id)
             if anchor is None:
                 return True
-            x, y, speed = anchor
-            horizon = min(max(0., now_s-tr.last_seen_s), self.association_memory_horizon_s)
-            # A prediction drifting for a minute is not identity evidence at a
-            # different heater. Retain bounded short-occlusion motion support.
-            return math.hypot(det.x-x, det.y-y) <= self.gate_m+speed*horizon
+            return math.hypot(det.x-anchor[0], det.y-anchor[1]) <= self.gate_m
         matches, unmatched = associate(
             [self._filters[t.track_id] for t in live], detections,
             self.measurement_variance, self.association_gate_chi2,
@@ -450,12 +431,8 @@ class SourceTrackerCore:
         updated = set()
         for i, j in matches:
             tr, det = live[i], detections[j]
-            gap = now_s - tr.last_seen_s
             retain_confirmation = (tr.ever_confirmed and tr.status != STATUS_CANDIDATE
                                    and tr.existence_probability >= self.confirm_probability)
-            if tr.status == STATUS_STALE:
-                tr.reacquisitions += 1
-                tr.last_reacquisition_s = gap
             filt = self._filters[tr.track_id]
             filt.correct((det.x, det.y), self.measurement_variance / max(det.confidence, 0.1))
             tr.strength = 0.7*tr.strength + 0.3*det.strength
@@ -466,23 +443,23 @@ class SourceTrackerCore:
             tr.consecutive_observations += 1
             tr.last_seen_s = now_s
             tr.status = STATUS_CONFIRMED if retain_confirmation else STATUS_CANDIDATE
-            self._anchors[tr.track_id] = (det.x, det.y, float(np.linalg.norm(filt.state[2:])))
+            self._anchors[tr.track_id] = (det.x, det.y)
             updated.add(tr.track_id)
         for j in sorted(unmatched):
             if len(live) >= self.max_tracks:
                 break
             det = detections[j]
             # Suppress only duplicate peaks, not the whole neighbourhood of a
-            # historical confirmation: nearby moving sources may be distinct.
+            # historical confirmation: nearby stationary sources may be distinct.
             if any(np.hypot(det.x-self._filters[t.track_id].state[0],
                             det.y-self._filters[t.track_id].state[1]) < self.merge_radius_m*0.35
                    for t in live if t.track_id in updated):
                 continue
             tr = self._new_track(det, now_s)
-            self._filters[tr.track_id] = MotionFilter(
-                np.array([det.x, det.y, 0., 0.]), stamp_s=now_s)
+            self._filters[tr.track_id] = PositionFilter(
+                np.array([det.x, det.y]), stamp_s=now_s)
             live.append(tr)
-            self._anchors[tr.track_id] = (det.x, det.y, 0.)
+            self._anchors[tr.track_id] = (det.x, det.y)
             updated.add(tr.track_id)
         for tr in live:
             filt = self._filters[tr.track_id]
@@ -493,7 +470,7 @@ class SourceTrackerCore:
                 tr.consecutive_observations = 0
                 if now_s-tr.last_seen_s >= self.stale_after_s:
                     tr.status = STATUS_STALE
-            tr.x, tr.y, tr.vx, tr.vy = map(float, filt.state)
+            tr.x, tr.y = map(float, filt.state)
             tr.covariance_xx = float(filt.covariance[0, 0])
             tr.covariance_xy = float(filt.covariance[0, 1])
             tr.covariance_yy = float(filt.covariance[1, 1])
@@ -512,7 +489,7 @@ class SourceTrackerCore:
                 self._cold_stamps.pop(tr.track_id, None)
         return self.tracks
 
-    def _extract_motion_detections(self, temperature, confidence, resolution, ox, oy, age=None):
+    def _extract_components(self, temperature, confidence, resolution, ox, oy, age=None):
         temp=np.asarray(temperature,dtype=float);conf=np.asarray(confidence,dtype=float)
         if temp.ndim!=2 or conf.shape!=temp.shape or temp.size==0:return []
         observed=np.isfinite(temp)&np.isfinite(conf)&(conf>=self.min_confidence)

@@ -50,21 +50,18 @@ class SourceTrackerNode(Node):
             update_alpha_min=float(g('update_alpha_min').value),
             max_detection_age_s=float(g('max_detection_age_s').value),
         )
-        for name, default in [('motion_model', 'legacy'), ('update_rate', 2.0),
-                              ('acceleration_std', .4), ('measurement_variance', .15),
+        for name, default in [('estimator_model', 'legacy'), ('update_rate', 2.0),
+                              ('position_noise_std', .05), ('measurement_variance', .15),
                               ('association_gate_chi2', 9.21), ('max_tracks', 32),
-                              ('association_memory_horizon_s', 5.), ('cold_evidence_decay_s', 2.),
-                              ('lost_velocity_decay_s', 2.),
+                              ('cold_evidence_decay_s', 2.),
                               ('slow_prior_enabled', True),('strategy','fast'),('slow_timeout_s',3.)]:
             self.declare_parameter(name, default)
-        self._tracker.motion_model = str(g('motion_model').value)
-        self._tracker.acceleration_std = float(g('acceleration_std').value)
+        self._tracker.estimator_model = str(g('estimator_model').value)
+        self._tracker.position_noise_std = float(g('position_noise_std').value)
         self._tracker.measurement_variance = float(g('measurement_variance').value)
         self._tracker.association_gate_chi2 = float(g('association_gate_chi2').value)
         self._tracker.max_tracks = int(g('max_tracks').value)
-        self._tracker.association_memory_horizon_s = float(g('association_memory_horizon_s').value)
         self._tracker.cold_evidence_decay_s = float(g('cold_evidence_decay_s').value)
-        self._tracker.lost_velocity_decay_s = float(g('lost_velocity_decay_s').value)
         self._update_period = 1.0 / float(g('update_rate').value)
         self._last_update = -float('inf')
         self._slow_prior_enabled = bool(g('slow_prior_enabled').value)
@@ -92,7 +89,7 @@ class SourceTrackerNode(Node):
         stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
         if not hasattr(self,'_stamp_origin'): self._stamp_origin=stamp
         now_s = stamp-self._stamp_origin
-        if self._tracker.motion_model == 'kalman' and now_s-self._last_update < self._update_period:
+        if self._tracker.estimator_model == 'kalman' and now_s-self._last_update < self._update_period:
             return
         self._last_update = now_s
         started=time.perf_counter()
@@ -128,17 +125,11 @@ class SourceTrackerNode(Node):
         msg.existence_probability = float(track.existence_probability)
         msg.confidence = float(track.confidence)
         msg.observations = int(track.observations)
-        msg.velocity.x = float(track.vx)
-        msg.velocity.y = float(track.vy)
         msg.age_s = float(max(0., self._last_update-track.last_seen_s))
-        filt = self._tracker._filters.get(track.track_id)
-        msg.velocity_variance = float(np.trace(filt.covariance[2:,2:])) if filt else 0.
-        msg.reacquisitions = track.reacquisitions
-        msg.last_reacquisition_s = float(track.last_reacquisition_s)
         return msg
 
     def _prior_cb(self, msg):
-        if (not self._slow_prior_enabled or self._tracker.motion_model != 'kalman'
+        if (not self._slow_prior_enabled or self._tracker.estimator_model != 'kalman'
                 or msg.mode != 'online' or msg.health != 'ready'
                 or msg.revision == self._last_prior_revision):
             return
@@ -167,12 +158,10 @@ class SourceTrackerNode(Node):
             f = self._tracker._filters.get(track.track_id)
             if f is None:
                 continue
-            slow_cov = np.diag([max(src.covariance_xx,.1),max(src.covariance_yy,.1),
-                                max(src.velocity_variance/2,.2),max(src.velocity_variance/2,.2)])
+            slow_cov = np.diag([max(src.covariance_xx,.1),max(src.covariance_yy,.1)])
             ia,ib=np.linalg.inv(f.covariance),np.linalg.inv(slow_cov)
             cov=np.linalg.inv(.9*ia+.1*ib)
-            prior=np.array([src.position.x+age*src.velocity.x,src.position.y+age*src.velocity.y,
-                            src.velocity.x,src.velocity.y])
+            prior=np.array([src.position.x,src.position.y])
             f.state=cov@(.9*ia@f.state+.1*ib@prior)
             f.covariance=cov
             used.add(track.track_id)

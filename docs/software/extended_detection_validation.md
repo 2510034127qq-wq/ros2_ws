@@ -1,5 +1,7 @@
 # 扩展探测测试（2026-09-05）
 
+> 历史版本记录：当前代码已按 [2026-09-06 静态巡检范围](../superpowers/specs/2026-09-06-static-thermal-inspection-design.md) 精简，本文结果与动态接口不代表精简后的实现。
+
 新增 8 次真实 ROS/Gazebo 闭环，累计 1050 秒（17.5 分钟）采样。8/8 通过运行检查，6/8 在采样窗口发现全部活跃物理源；4/8 出现单个物理源对应多个已确认标签。当前版本运行稳定性在这些用例中通过，但探测质量仍有缺口。
 
 固定代码为 `7bfaf5f`（实现提交 `730676d`）。8 次运行的源码指纹完全一致；期间未调整算法、配置或门限来改善结果。统一使用 `dual + online`，串行运行以隔离 Gazebo master。原始结果在 `bags/software_validation/20260905_extended_detection/`，机器可读证据、输入配置、哈希和详细轨迹映射见 [结果快照](extended_detection_validation_snapshot.json)。批次脚本及离线分析脚本也保留在原始结果目录。

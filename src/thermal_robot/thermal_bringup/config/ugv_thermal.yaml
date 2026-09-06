@@ -32,7 +32,7 @@ thermal_mapper_node:
     fusion_memory_s: 3.0
 source_tracker_node:
   ros__parameters:
-    motion_model: kalman
+    estimator_model: kalman
     gate_m: 3.0
     merge_radius_m: 0.5
     max_detection_age_s: 1.5
@@ -43,4 +43,3 @@ controller_node:
     spawn_x: 0.0
     spawn_y: 0.0
     max_linear_vel: 0.2
-    clearance_terminate: false

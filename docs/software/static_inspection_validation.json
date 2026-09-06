@@ -1,0 +1,670 @@
+{
+  "date": "2026-09-06",
+  "baseline_commit": "581c802",
+  "scope": "stationary continuous thermal-source code simplification",
+  "code_lines": {
+    "runtime_python": {
+      "before": 9081,
+      "after": 8572,
+      "net_removed": 509
+    },
+    "tool_python": {
+      "before": 6607,
+      "after": 5700,
+      "net_removed": 907
+    },
+    "test_python": {
+      "before": 3542,
+      "after": 3099,
+      "net_removed": 443
+    }
+  },
+  "unit_tests": {
+    "passed": 174,
+    "command": "python3 -m pytest src/thermal_robot/tests -q"
+  },
+  "runtime_sync": {
+    "pairs": 48,
+    "mismatches": 0
+  },
+  "hardware_contract": {
+    "passed": true,
+    "failures": [],
+    "hot_cells_xy": [
+      [
+        4.125,
+        1.625
+      ],
+      [
+        4.125,
+        1.875
+      ],
+      [
+        4.125,
+        2.125
+      ],
+      [
+        4.125,
+        2.375
+      ]
+    ],
+    "confirmed_sources": [
+      {
+        "id": "src_1",
+        "x": 4.125,
+        "y": 1.9999999999999996
+      }
+    ],
+    "belief_ready_messages": 17,
+    "motion_messages": 0,
+    "input": "synthetic padded big-endian TLinear and mm depth; static optical TF",
+    "limitation": "No physical camera, calibration, UVC or UGV motion verified."
+  },
+  "runs": [
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_b2_retry",
+      "run": {
+        "command": [
+          "ros2",
+          "launch",
+          "thermal_bringup",
+          "sim_nav_slam_launch.py",
+          "use_rviz:=false",
+          "use_gzclient:=false",
+          "strategy:=dual",
+          "sensor_model:=b",
+          "belief_mode:=online",
+          "run_seed:=101",
+          "scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/static_two_sources.yaml",
+          "world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_nav.world"
+        ],
+        "runtime_sha256": "eb60e3655120b981f0aa7e68d94799bae5192959d117bb1ab672138d6a536aaa",
+        "args": {
+          "out": "bags/software_validation/20260906_static_simplified_b2_retry",
+          "sensor_model": "b",
+          "strategy": "dual",
+          "belief_mode": "online",
+          "duration": 90.0,
+          "warmup": 36.0,
+          "domain": 182,
+          "scenario": "static_two_sources.yaml",
+          "world": "thermal_scene_nav.world",
+          "software_params": "",
+          "expected_health": "ready",
+          "seed": 101
+        }
+      },
+      "probe": {
+        "passed": true,
+        "failures": [],
+        "counts": {
+          "depth": 771,
+          "raw": 771,
+          "truth": 771,
+          "filtered": 771,
+          "field": 771,
+          "gradient": 771,
+          "map": 342,
+          "belief": 89,
+          "odom": 1776,
+          "sources": 167,
+          "cmd_vel": 889,
+          "scan": 887,
+          "plan": 1
+        },
+        "belief_health": {
+          "ready": 89
+        },
+        "max_observed_cells": 16219,
+        "valid_depth_pixels": 15108,
+        "confirmed_ids": [
+          "src_1",
+          "src_2"
+        ],
+        "belief_ids": [
+          "belief_1",
+          "belief_2"
+        ],
+        "belief_compute_ms_p99": 1.5970039033889774,
+        "path_length_m": 10.367798559695082,
+        "nonzero_commands": 866,
+        "max_temperature_c": 52.15927505493164,
+        "sensor_model": "b",
+        "strategy": "dual",
+        "belief_mode": "online",
+        "expected_health": "ready",
+        "yaw_range_rad": 13.222643073495783,
+        "physical_geometry_samples": 90,
+        "physical_geometry_error_max_m": 0.0,
+        "confirmed_nearest_truth_error_p95_m": 0.29300257430588594,
+        "confirmed_nearest_truth_error_max_m": 0.29300257430588594,
+        "fresh_nearest_physical_source_error_p95_m": 0.24262863684058938,
+        "confirmed_inactive_nearest_frames": 0,
+        "note": "Active truth distance includes predicted tracks after emission stops. Physical source distance includes inactive bodies. Neither is matched precision or recall."
+      },
+      "detection": {
+        "definition": "fresh confirmed tracks; nearest active truth within gate; >= min_hits over probe window",
+        "identity_definition": "identity continuity matches physical bodies including temporarily inactive heaters",
+        "gate_m": 1.0,
+        "max_age_s": 1.5,
+        "min_hits": 3,
+        "active_truth_ids": [
+          "T1_north",
+          "T2_east"
+        ],
+        "detected_truth_ids": [
+          "T1_north",
+          "T2_east"
+        ],
+        "missed_truth_ids": [],
+        "window_recall": 1.0,
+        "confirmed_track_to_truth": {
+          "src_2": {
+            "T1_north": 60
+          },
+          "src_1": {
+            "T2_east": 92
+          }
+        },
+        "identity_switches": [],
+        "identity_switch_count": 0,
+        "duplicate_truth_bins": 0,
+        "fresh_confirmed_rows": 152,
+        "unmatched_rows": 0,
+        "inactive_match_rows": 0,
+        "ambiguous_rows": 0,
+        "active_location_p95_m": 0.24271997773013015
+      },
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 54,
+        "fast_only_reports": 1,
+        "navigation_stall_fallbacks": 1,
+        "source_approach_confirmations": 2,
+        "blocked_source_deferrals": 0,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 3,
+        "fast_update_ms_max": 1.266,
+        "planner_ms_max": 11.5
+      },
+      "artifact_sha256": {
+        "run.json": "aa63e5dbfd1408396741eac4ca296f387d59390e2ccef0f326054244af4c601e",
+        "probe.json": "28b3033d20565e5eb7d4c8e60c1438abeb99d728008dc746f003173540ce780b",
+        "sources.json": "d93a9bb834039b3207fa9e9cbcf5f12bd815351ab3efb790055dff5f357f26ff",
+        "truth.json": "5dad435db22e8bb61f1a34ad2cca61058c5d340e53b666261bc85b0872cb541b",
+        "detection_metrics.json": "c20836ce270bfdeaf60bbded0cc725d8a0d44cc3971564106a16ff5f83d877f7",
+        "runtime_diagnostics.json": "bb4ee7a04a4a0a10a3ce125bf9e37f8a8381b26389601c06ac064c6970466be2"
+      }
+    },
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_b5_obstacles",
+      "run": {
+        "command": [
+          "ros2",
+          "launch",
+          "thermal_bringup",
+          "sim_nav_slam_launch.py",
+          "use_rviz:=false",
+          "use_gzclient:=false",
+          "strategy:=dual",
+          "sensor_model:=b",
+          "belief_mode:=online",
+          "run_seed:=202",
+          "scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/static_five_sources.yaml",
+          "world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_obstacle_field.world"
+        ],
+        "runtime_sha256": "35bc04b0a7dc5dd068b1449e1b80a2b5ce1f87a7f9830c9714de9ea4ab5e4dd3",
+        "args": {
+          "out": "bags/software_validation/20260906_static_simplified_b5_obstacles",
+          "sensor_model": "b",
+          "strategy": "dual",
+          "belief_mode": "online",
+          "duration": 120.0,
+          "warmup": 36.0,
+          "domain": 183,
+          "scenario": "static_five_sources.yaml",
+          "world": "thermal_scene_obstacle_field.world",
+          "software_params": "",
+          "expected_health": "ready",
+          "seed": 202
+        }
+      },
+      "probe": {
+        "passed": false,
+        "failures": [
+          "no_physical_surface_geometry"
+        ],
+        "counts": {
+          "gradient": 1029,
+          "sources": 220,
+          "depth": 1028,
+          "raw": 1028,
+          "truth": 1028,
+          "filtered": 1028,
+          "field": 1028,
+          "cmd_vel": 1202,
+          "belief": 119,
+          "map": 462,
+          "odom": 2354,
+          "scan": 1177,
+          "plan": 7
+        },
+        "belief_health": {
+          "ready": 119
+        },
+        "max_observed_cells": 15185,
+        "valid_depth_pixels": 14668,
+        "confirmed_ids": [
+          "src_1",
+          "src_2",
+          "src_3",
+          "src_4",
+          "src_6",
+          "src_7",
+          "src_8"
+        ],
+        "belief_ids": [
+          "belief_1",
+          "belief_2",
+          "belief_3",
+          "belief_4",
+          "belief_5",
+          "belief_6",
+          "belief_7"
+        ],
+        "belief_compute_ms_p99": 1.7467455506324765,
+        "path_length_m": 10.5578256330807,
+        "nonzero_commands": 1107,
+        "max_temperature_c": 52.16938018798828,
+        "sensor_model": "b",
+        "strategy": "dual",
+        "belief_mode": "online",
+        "expected_health": "ready",
+        "yaw_range_rad": 13.457632512663963,
+        "physical_geometry_samples": 0,
+        "physical_geometry_error_max_m": null,
+        "confirmed_nearest_truth_error_p95_m": 0.4528482189647442,
+        "confirmed_nearest_truth_error_max_m": 0.4636861454097214,
+        "fresh_nearest_physical_source_error_p95_m": 0.4201096798504942,
+        "confirmed_inactive_nearest_frames": 0,
+        "note": "Nearest-source distances are diagnostics, not matched precision or recall; use detection_metrics.json for physical-source matching."
+      },
+      "detection": {
+        "definition": "fresh confirmed tracks; nearest active truth within gate; >= min_hits over probe window",
+        "identity_definition": "identity continuity matches physical bodies including temporarily inactive heaters",
+        "gate_m": 1.0,
+        "max_age_s": 1.5,
+        "min_hits": 3,
+        "active_truth_ids": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "detected_truth_ids": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "missed_truth_ids": [],
+        "window_recall": 1.0,
+        "confirmed_track_to_truth": {
+          "src_1": {
+            "S2_east": 89
+          },
+          "src_3": {
+            "S5_west_weak": 6
+          },
+          "src_4": {
+            "S4_southwest": 5
+          },
+          "src_6": {
+            "S3_southeast": 47
+          },
+          "src_2": {
+            "S1_north": 34
+          },
+          "src_7": {
+            "S5_west_weak": 6
+          },
+          "src_8": {
+            "S4_southwest": 5
+          }
+        },
+        "identity_switches": [],
+        "identity_switch_count": 0,
+        "duplicate_truth_bins": 0,
+        "fresh_confirmed_rows": 192,
+        "unmatched_rows": 0,
+        "inactive_match_rows": 0,
+        "ambiguous_rows": 0,
+        "active_location_p95_m": 0.43319014252156257
+      },
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 69,
+        "fast_only_reports": 0,
+        "navigation_stall_fallbacks": 3,
+        "source_approach_confirmations": 1,
+        "blocked_source_deferrals": 6,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 3,
+        "fast_update_ms_max": 1.383,
+        "planner_ms_max": 10.9
+      },
+      "artifact_sha256": {
+        "run.json": "a8f26e47b4a448396ae6c9a84cd187f0bd3a33108a9a9d2bbdfddf806063d06f",
+        "probe.json": "ac8a8bc3aeabb9caafbaa77d54fe4715de78506fc95b61fa928b7b22d7a05ee2",
+        "sources.json": "805dd04e64dfa72e4336b541bbf0fbb6aa411080f4cc273855d5002ae11fb549",
+        "truth.json": "e1717eea3cf3e00465020af438e9dbdab619405b352a7706d73da47f2bb60b96",
+        "detection_metrics.json": "39a65ed7555f01d8d2c038fbde1e606b9a7a9c0bbdbe379cc62f85b23a15ff94",
+        "runtime_diagnostics.json": "36ea3494f3047dd141744672e34ba446b72d97f07e23ef3bae11e0bbe59babf7"
+      }
+    },
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_b5_retry",
+      "run": {
+        "command": [
+          "ros2",
+          "launch",
+          "thermal_bringup",
+          "sim_nav_slam_launch.py",
+          "use_rviz:=false",
+          "use_gzclient:=false",
+          "strategy:=dual",
+          "sensor_model:=b",
+          "belief_mode:=online",
+          "run_seed:=202",
+          "scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/static_five_sources.yaml",
+          "world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_obstacle_field.world"
+        ],
+        "runtime_sha256": "d3b62f9d4f5089b5e5d577da9479a28ae6ea754bec98ad4e5896049cc0e2c639",
+        "args": {
+          "out": "bags/software_validation/20260906_static_simplified_b5_retry",
+          "sensor_model": "b",
+          "strategy": "dual",
+          "belief_mode": "online",
+          "duration": 90.0,
+          "warmup": 36.0,
+          "domain": 183,
+          "scenario": "static_five_sources.yaml",
+          "world": "thermal_scene_obstacle_field.world",
+          "software_params": "",
+          "expected_health": "ready",
+          "seed": 202
+        }
+      },
+      "probe": {
+        "passed": true,
+        "failures": [],
+        "counts": {
+          "raw": 772,
+          "depth": 772,
+          "filtered": 772,
+          "field": 772,
+          "gradient": 772,
+          "sources": 169,
+          "truth": 771,
+          "map": 342,
+          "cmd_vel": 898,
+          "belief": 89,
+          "odom": 1775,
+          "scan": 888,
+          "plan": 5
+        },
+        "belief_health": {
+          "ready": 89
+        },
+        "max_observed_cells": 14014,
+        "valid_depth_pixels": 14656,
+        "confirmed_ids": [
+          "src_1",
+          "src_2",
+          "src_3",
+          "src_4",
+          "src_5"
+        ],
+        "belief_ids": [
+          "belief_1",
+          "belief_2",
+          "belief_3",
+          "belief_4",
+          "belief_5"
+        ],
+        "belief_compute_ms_p99": 1.740470385551453,
+        "path_length_m": 7.627967646067953,
+        "nonzero_commands": 809,
+        "max_temperature_c": 52.169281005859375,
+        "sensor_model": "b",
+        "strategy": "dual",
+        "belief_mode": "online",
+        "expected_health": "ready",
+        "yaw_range_rad": 7.916475466858263,
+        "physical_geometry_samples": 4440,
+        "physical_geometry_error_max_m": 0.0,
+        "confirmed_nearest_truth_error_p95_m": 0.39064910334084013,
+        "confirmed_nearest_truth_error_max_m": 0.4637467141855837,
+        "fresh_nearest_physical_source_error_p95_m": 0.39243329011402683,
+        "confirmed_inactive_nearest_frames": 0,
+        "note": "Nearest-source distances are diagnostics, not matched precision or recall; use detection_metrics.json for physical-source matching."
+      },
+      "detection": {
+        "definition": "fresh confirmed tracks; nearest active truth within gate; >= min_hits over probe window",
+        "identity_definition": "identity continuity matches physical bodies including temporarily inactive heaters",
+        "gate_m": 1.0,
+        "max_age_s": 1.5,
+        "min_hits": 3,
+        "active_truth_ids": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "detected_truth_ids": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "missed_truth_ids": [],
+        "window_recall": 1.0,
+        "confirmed_track_to_truth": {
+          "src_1": {
+            "S2_east": 60
+          },
+          "src_3": {
+            "S5_west_weak": 6
+          },
+          "src_4": {
+            "S4_southwest": 5
+          },
+          "src_5": {
+            "S3_southeast": 18
+          },
+          "src_2": {
+            "S1_north": 27
+          }
+        },
+        "identity_switches": [],
+        "identity_switch_count": 0,
+        "duplicate_truth_bins": 0,
+        "fresh_confirmed_rows": 116,
+        "unmatched_rows": 0,
+        "inactive_match_rows": 0,
+        "ambiguous_rows": 0,
+        "active_location_p95_m": 0.39243329011402683
+      },
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 54,
+        "fast_only_reports": 0,
+        "navigation_stall_fallbacks": 3,
+        "source_approach_confirmations": 1,
+        "blocked_source_deferrals": 2,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 2,
+        "fast_update_ms_max": 1.586,
+        "planner_ms_max": 10.8
+      },
+      "artifact_sha256": {
+        "run.json": "937fb0e139ee2ded543d4b929f82819643e5f8984439939e7682241f57007627",
+        "probe.json": "46644a0d5b06c2f55d600be5f35461c60245a22892cb58cc0eba8ad00cb80778",
+        "sources.json": "a878afb9a14a3228040d7d4058f20ce9186879721cfa317fc1bd39212da5f203",
+        "truth.json": "4b742bae9b9c782424a967066c4e137cf9f6bdb91256e49a1cc84b2ef0a92ca8",
+        "detection_metrics.json": "c2b35cfa92952ea0a5101c15e3cd0ea0133b5bb77c86e72c2ad29c1cb89bc045",
+        "runtime_diagnostics.json": "235db5a70bd3ebb3a0f4618fabbfeccbaecf689c25c8b662dc1c024fe32da122"
+      }
+    },
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_a2_fast",
+      "run": {
+        "command": [
+          "ros2",
+          "launch",
+          "thermal_bringup",
+          "sim_nav_slam_launch.py",
+          "use_rviz:=false",
+          "use_gzclient:=false",
+          "strategy:=fast",
+          "sensor_model:=a",
+          "belief_mode:=shadow",
+          "run_seed:=303",
+          "scenario_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/config/scenarios/static_two_sources.yaml",
+          "world_file:=/home/hanchen/ros2_ws/src/thermal_robot/thermal_bringup/worlds/thermal_scene_nav.world"
+        ],
+        "runtime_sha256": "44446ccc278c7ef458a64ee095c09573fa6ac58ba4233d932fccf056a89491c1",
+        "args": {
+          "out": "bags/software_validation/20260906_static_simplified_a2_fast",
+          "sensor_model": "a",
+          "strategy": "fast",
+          "belief_mode": "shadow",
+          "duration": 90.0,
+          "warmup": 36.0,
+          "domain": 184,
+          "scenario": "static_two_sources.yaml",
+          "world": "thermal_scene_nav.world",
+          "software_params": "",
+          "expected_health": "ready",
+          "seed": 303
+        }
+      },
+      "probe": {
+        "passed": true,
+        "failures": [],
+        "counts": {
+          "raw": 898,
+          "field": 898,
+          "gradient": 897,
+          "cmd_vel": 915,
+          "truth": 897,
+          "map": 358,
+          "odom": 1775,
+          "filtered": 888,
+          "scan": 887,
+          "sources": 177,
+          "belief": 88,
+          "plan": 9
+        },
+        "belief_health": {
+          "ready": 88
+        },
+        "max_observed_cells": 1356,
+        "valid_depth_pixels": 0,
+        "confirmed_ids": [
+          "src_1"
+        ],
+        "belief_ids": [
+          "belief_1"
+        ],
+        "belief_compute_ms_p99": 3.3669394516944875,
+        "path_length_m": 11.86878523839517,
+        "nonzero_commands": 878,
+        "max_temperature_c": 53.522891998291016,
+        "sensor_model": "a",
+        "strategy": "fast",
+        "belief_mode": "shadow",
+        "expected_health": "ready",
+        "yaw_range_rad": 2.1828561173346337,
+        "physical_geometry_samples": 0,
+        "physical_geometry_error_max_m": null,
+        "confirmed_nearest_truth_error_p95_m": 0.23886380068204668,
+        "confirmed_nearest_truth_error_max_m": 0.3480355753240941,
+        "fresh_nearest_physical_source_error_p95_m": 0.26097325393104737,
+        "confirmed_inactive_nearest_frames": 0,
+        "note": "Nearest-source distances are diagnostics, not matched precision or recall; use detection_metrics.json for physical-source matching."
+      },
+      "detection": {
+        "definition": "fresh confirmed tracks; nearest active truth within gate; >= min_hits over probe window",
+        "identity_definition": "identity continuity matches physical bodies including temporarily inactive heaters",
+        "gate_m": 1.0,
+        "max_age_s": 1.5,
+        "min_hits": 3,
+        "active_truth_ids": [
+          "T1_north",
+          "T2_east"
+        ],
+        "detected_truth_ids": [
+          "T1_north"
+        ],
+        "missed_truth_ids": [
+          "T2_east"
+        ],
+        "window_recall": 0.5,
+        "confirmed_track_to_truth": {
+          "src_1": {
+            "T1_north": 71
+          }
+        },
+        "identity_switches": [],
+        "identity_switch_count": 0,
+        "duplicate_truth_bins": 0,
+        "fresh_confirmed_rows": 71,
+        "unmatched_rows": 0,
+        "inactive_match_rows": 0,
+        "ambiguous_rows": 0,
+        "active_location_p95_m": 0.27404962389932214
+      },
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 0,
+        "fast_only_reports": 55,
+        "navigation_stall_fallbacks": 5,
+        "source_approach_confirmations": 1,
+        "blocked_source_deferrals": 0,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 0,
+        "fast_update_ms_max": 2.962,
+        "planner_ms_max": 34.8
+      },
+      "artifact_sha256": {
+        "run.json": "439a771e57bfb214a1f6fabe65a4824130c5d42a177ed467a83ba38e6cc5fefd",
+        "probe.json": "d3a52f987a0094b2fda8f7dcffcec734e5a68ce94d08a0182eeb3bdcdda5c348",
+        "sources.json": "22ce6ebe52c490628f6ae205c9765bfc5fafcf050ff00ff950ba37a6a987f416",
+        "truth.json": "ca19e31e82877c1ff49426841addae7f525864450b61095da3091aa0702f2f21",
+        "detection_metrics.json": "80574004079fc3afee5e0cfabb7c66a89dd9a6ea9992ef1dc80ff20f24290d77",
+        "runtime_diagnostics.json": "cb178f5ee54e2af8997feafb46d8fe08cfbc63d5983b573e54c52530161cce64"
+      }
+    }
+  ],
+  "retained_failures": [
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_b2",
+      "error": "Probe max_clear initialization removed by mistake; fixed and rerun. No detection result."
+    },
+    {
+      "directory": "bags/software_validation/20260906_static_simplified_b5_obstacles",
+      "error": "Per-body geometry service yielded no samples; ModelStates subscription replaces it. Two physical sources also had sequential duplicate IDs."
+    }
+  ],
+  "limits": [
+    "A-level fast/shadow found only 1 of 2 sources in 90 s.",
+    "B5 120 s had two sequential duplicate identities; a shorter passing rerun does not erase this finding.",
+    "No full matrix, research acceptance, clearance calibration or physical Pi 5/hardware validation.",
+    "Each run retains its launch fingerprint; validation transport and legacy peak-transition fixes are described in the devlog."
+  ]
+}

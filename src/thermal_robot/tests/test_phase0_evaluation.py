@@ -321,7 +321,7 @@ class TestStaticFiveScenario(unittest.TestCase):
         sc = load_scenario_file(str(path))
         self.assertEqual(len(sc.sources), 5)
         for src in sc.sources:
-            self.assertEqual(src.motion, 'static')
+            self.assertEqual(src.state(0.), src.state(60.))
             self.assertGreaterEqual(src.amplitude, 14.0)
 
 
@@ -330,29 +330,29 @@ class TestMatrixRunnerConfig(unittest.TestCase):
     def setUpClass(cls):
         cls.runner = _load_script('run_multiscenario_matrix')
 
-    def test_phase0_grid_is_4x6(self):
+    def test_static_grid_is_4x3(self):
         cases = self.runner.phase0_cases()
-        self.assertEqual(len(cases), 24)
+        self.assertEqual(len(cases), 12)
         worlds = {c.world.name for c in cases}
         scenarios = {c.scenario.name for c in cases}
         self.assertEqual(len(worlds), 4)
-        self.assertEqual(len(scenarios), 6)
+        self.assertEqual(len(scenarios), 3)
 
     def test_phase0_case_names_use_class_keys(self):
         names = {c.name for c in self.runner.phase0_cases()}
         self.assertIn('open__static2', names)
-        self.assertIn('boxes__dyn5', names)
-        self.assertIn('walls__birthdeath', names)
+        self.assertIn('boxes__static5', names)
+        self.assertIn('walls__static3', names)
         self.assertIn('mixed__static5', names)
 
     def test_filter_cases_by_world_and_case(self):
         cases = self.runner.phase0_cases()
         only_open = self.runner.filter_cases(cases, worlds='open', case_names='')
-        self.assertEqual(len(only_open), 6)
+        self.assertEqual(len(only_open), 3)
         one = self.runner.filter_cases(cases, worlds='', case_names='open__static2')
         self.assertEqual(len(one), 1)
         two_worlds = self.runner.filter_cases(cases, worlds='open,boxes', case_names='')
-        self.assertEqual(len(two_worlds), 12)
+        self.assertEqual(len(two_worlds), 6)
 
     def test_parse_seeds(self):
         self.assertEqual(self.runner.parse_seeds('101,102,103'), [101, 102, 103])
@@ -365,7 +365,7 @@ class TestMatrixRunnerConfig(unittest.TestCase):
         self.assertTrue(str(occ).endswith('thermal_scene_obstacle_field.npz'))
 
     def test_scenario_fov_reads_yaml(self):
-        path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios/dynamic_five_sources.yaml'
+        path = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios/static_five_sources.yaml'
         self.assertEqual(self.runner.scenario_fov(path), (4.0, 3.0))
 
     def test_scenario_fov_custom_values(self):
@@ -399,7 +399,6 @@ class TestMatrixRunnerConfig(unittest.TestCase):
             'truth_sources': 10,
             'cmd_vel': 10,
             'scan_stats': 10,
-            'clearance': 2,
         }
 
     def _write_complete_artifacts(self, run_dir):
@@ -430,10 +429,7 @@ class TestMatrixRunnerConfig(unittest.TestCase):
             'failure_counts': {'not_reached': 1},
         }) + '\n')
         (run_dir / 'launch.log').write_text('[controller] started\n')
-        clearance_rows = ''.join(
-            f'{index},{0.8 - index * 0.1}\n'
-            for index in range(counts['clearance']))
-        (run_dir / 'clearance.csv').write_text('t,p_clear\n' + clearance_rows)
+
 
     def _fingerprint(self, case, **overrides):
         values = {
@@ -574,7 +570,7 @@ class TestMatrixRunnerConfig(unittest.TestCase):
             run_dir = Path(td) / case.name / 'seed101'
             run_dir.mkdir(parents=True)
             self._write_complete_artifacts(run_dir)
-            (run_dir / 'clearance.csv').unlink()
+            (run_dir / 'attribution.json').unlink()
             self.runner.write_run_result(run_dir, result)
             self.assertIsNone(self.runner.load_resumable_result(
                 run_dir, case, seed=101, strategy='residual',
@@ -675,7 +671,7 @@ class TestMatrixRunnerConfig(unittest.TestCase):
             self.assertIsNone(load())
 
             self._write_complete_artifacts(run_dir)
-            (run_dir / 'clearance.csv').write_text('t,p_clear\n')
+            (run_dir / 'trajectory.csv').write_text('t,x,y\n')
             self.assertIsNone(load())
 
             self._write_complete_artifacts(run_dir)

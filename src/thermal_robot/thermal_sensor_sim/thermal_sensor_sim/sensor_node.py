@@ -35,7 +35,6 @@ from thermal_sensor_sim.scenario import (
 )
 
 
-from gazebo_msgs.srv import SetEntityState
 from thermal_field_reconstructor.perspective import CameraIntrinsics, SensorPose3D
 from thermal_sensor_sim.surface_scene import (SurfaceRenderer, SensorEffects,
     objects_from_world, objects_from_sources)
@@ -125,8 +124,6 @@ class SensorNode(Node):
         self._camera_pub = self.create_publisher(CameraInfo, '/thermal/camera_info', pub_qos)
         self._truth_pub = self.create_publisher(SourceEstimateArray, '/sim/thermal_sources_truth', pub_qos)
         self._sub       = self.create_subscription(Odometry, '/odom', self._odom_cb, odom_qos)
-        self._state_client=self.create_client(SetEntityState,'/thermal_scene/set_entity_state') if self._sensor_model=='b' else None
-        self._state_futures=[];self._last_body_update=-float('inf')
         self._timer     = self.create_timer(1.0 / self._rate, self._cb)
 
         T_init = self._ambient + sum(
@@ -187,16 +184,6 @@ class SensorNode(Node):
                 yaw+float(g('camera_yaw_rad')),float(g('camera_pitch_rad')),float(g('camera_roll_rad')))
             faces=[f for f in g('surface_hot_faces') if f>=0]
             states=self._scenario.all_states(t)
-            self._state_futures=[f for f in self._state_futures if not f.done()]
-            if t-self._last_body_update>=.5 and not self._state_futures and self._state_client.service_is_ready():
-                self._last_body_update=t
-                for state in states:
-                    request=SetEntityState.Request();request.state.name='thermal_body_'+state.source_id
-                    request.state.pose.position.x=float(state.x);request.state.pose.position.y=float(state.y)
-                    request.state.pose.position.z=float(g('surface_height_m'))/2
-                    request.state.pose.orientation.w=1.
-                    request.state.reference_frame='world'
-                    self._state_futures.append(self._state_client.call_async(request))
             objects=objects_from_sources(states,float(g('surface_height_m')),float(g('surface_diameter_m')),
                 float(g('surface_emissivity')),str(g('surface_shape')),faces,ambient_c=self._ambient)
             arr,depth=self._renderer.render(pose,t,objects)

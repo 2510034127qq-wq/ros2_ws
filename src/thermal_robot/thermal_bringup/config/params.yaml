@@ -8,7 +8,6 @@
 # 核心修复：
 #   post_confirm_rounds=10：确认源后10轮frontier强制min_d=7m, dist_sigma=15m
 #   levy_post_confirm_step=10：确认后立即向已知源质心反方向跳跃10m
-#   no_new_source_timeout: 120→60s（更快触发无进展逃逸）
 # =============================================================================
 
 sensor_node:
@@ -107,14 +106,13 @@ controller_node:
     plateau_thresh:          2.0
     peak_confirm_s:          2.0
     rearm_cool_delta:        6.0
+    known_source_radius:         2.0
     source_repulsion_k:          0.8
     source_repulsion_min_dist:   0.5
     source_exclusion_radius:     2.0
-    revisit_radius:              2.0
     relocate_dist:      2.0
     relocate_lin_vel:   0.2
     peak_hold_s:        1.5
-    num_sources:       -1
     spawn_x:           -6.0
     spawn_y:            0.0
     stuck_timeout:              60.0  # v30: Nav2 handles stuck recovery
@@ -124,7 +122,6 @@ controller_node:
     centroid_arrival_r:          3.0
     max_search_radius:          12.0
     negative_trise_bail:         0.3
-    no_new_source_timeout:     180.0
 
     # ── Frontier + Lévy ────────────────────────────────────────────────────
     frontier_update_interval:    8.0
@@ -217,10 +214,3 @@ controller_node:
     residual_planner_footprint_radius:      2.0
     residual_planner_top_k:                  64
     residual_waypoint_min_d:                 3.0
-    clearance_source_rate_per_m2:           0.01
-    clearance_p_detect_per_sector:          0.7
-    clearance_residual_thresh:              1.5
-    clearance_epsilon:                      0.05
-    clearance_eval_interval_s:             10.0
-    clearance_domain_radius_m:             12.0
-    clearance_terminate: false

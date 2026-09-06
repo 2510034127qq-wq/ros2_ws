@@ -8,10 +8,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'thermal_motion_controller'))
-from thermal_motion_controller.motion_filter import MotionFilter, associate
+from thermal_motion_controller.position_filter import PositionFilter, associate
 from thermal_motion_controller.source_tracking import SourceTrackerCore, SourceDetection
 from thermal_motion_controller.runtime_policy import CoverageSweep, exploration_goal_due
-from thermal_motion_controller.revisit import RevisitScheduler
 
 
 def detection(x, y=0.):
@@ -19,20 +18,20 @@ def detection(x, y=0.):
 
 
 def test_uncertain_lost_track_cannot_steal_a_precise_tracks_observation():
-    lost = MotionFilter(np.array([4., 0., 0., 0.]), np.eye(4)*100.)
-    current = MotionFilter(np.array([4.1, 0., 0., 0.]), np.eye(4)*.1)
+    lost = PositionFilter(np.array([4., 0.]), np.eye(2)*100.)
+    current = PositionFilter(np.array([4.1, 0.]), np.eye(2)*.1)
     matches, unmatched = associate([lost, current], [detection(4.)])
     assert matches == [(1, 0)] and not unmatched
 
 
 def test_long_unobserved_drift_cannot_relabel_a_different_heater():
-    tracker = SourceTrackerCore(motion_model='kalman', gate_m=3., confirm_observations=3)
+    tracker = SourceTrackerCore(estimator_model='kalman', gate_m=3., confirm_observations=3)
     for t in range(10):
-        tracker.update([detection(.2*t)], float(t))
+        tracker.update([detection(2.+.05*np.sin(t))], float(t))
     old = tracker.tracks[0]
     for t in range(10, 40):
         tracker.update([], float(t))
-    assert old.x < 3.5 and abs(old.vx) < .001
+    assert old.x == pytest.approx(2., abs=.06)
     tracker.update([detection(8.)], 40.)
     assert len(tracker.tracks) == 2
     assert old.last_seen_s == 9.
@@ -40,7 +39,7 @@ def test_long_unobserved_drift_cannot_relabel_a_different_heater():
 
 
 def confirmed_tracker():
-    tracker = SourceTrackerCore(motion_model='kalman', max_detection_age_s=1.5,
+    tracker = SourceTrackerCore(estimator_model='kalman', max_detection_age_s=1.5,
                                 confirm_observations=3)
     for t in range(8):
         tracker.update([detection(2.125, 2.125)], float(t))
@@ -98,7 +97,7 @@ def test_surface_render_projection_fusion_and_tracker_distinguish_extinction_fro
     pose = SensorPose3D(0.,0.,.6)
     grid = WorldThermalGrid(center_x=4.,center_y=0.,size_x_m=10.,size_y_m=10.,
                             resolution=.25,fusion_memory_s=3.)
-    tracker = SourceTrackerCore(motion_model='kalman',max_detection_age_s=1.5,confirm_observations=3)
+    tracker = SourceTrackerCore(estimator_model='kalman',max_detection_age_s=1.5,confirm_observations=3)
     tracker.measurement_type = 'surface_radiance'
     for step in range(41):
         now = step*.5
@@ -165,11 +164,6 @@ def test_equal_unknown_regions_prefer_less_turning_but_heat_can_override():
     assert target.x < 0.
 
 
-def test_disproved_source_cannot_monopolize_revisit_with_large_covariance():
-    scheduler = RevisitScheduler()
-    source = dict(id='old', x=5., y=0., age_s=15., probability=.05, strength=25.,
-                  status='stale', covariance_xx=10000., covariance_yy=10000.)
-    assert scheduler.select([source], 20., (0., 0.)) is None
 
 
 def test_evaluation_counts_physical_sources_and_identity_switches_separately():

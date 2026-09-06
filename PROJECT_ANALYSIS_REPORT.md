@@ -1,5 +1,7 @@
 # thermal_robot 项目交接分析报告
 
+> 版本说明：本文为 `581c802` 保存的精简前资料。当前范围和接口以 [静态巡检代码精简规划](docs/superpowers/specs/2026-09-06-static-thermal-inspection-design.md) 为准。
+
 生成时间：2026-04-27  
 工作区：`/home/hanchen/ros2_ws`  
 结论版本：基于整理后的当前实际源码

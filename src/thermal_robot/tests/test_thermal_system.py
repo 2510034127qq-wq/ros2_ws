@@ -562,20 +562,6 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
             tracker.update([SourceDetection(x=1.0, y=2.0, strength=18.0, confidence=0.9)], now_s=float(i))
         self.assertEqual(tracker.tracks[0].status, 'confirmed')
 
-    def test_T_PY17_tracker_follows_dynamic_source_after_many_observations(self):
-        """T-PY17: 动态源长时间观测后仍要跟随当前位置，不能冻结在初始峰位."""
-        tracker = SourceTrackerCore(
-            confirm_observations=5,
-            confirm_covariance_max=1.0,
-            update_alpha_min=0.08,
-        )
-        for i in range(80):
-            x = -4.0 + 0.05 * i
-            tracker.update([SourceDetection(x=x, y=2.0, strength=18.0, confidence=0.9)], now_s=float(i))
-        track = tracker.tracks[0]
-        expected_x = -4.0 + 0.05 * 79
-        self.assertEqual(track.status, 'confirmed')
-        self.assertLess(abs(track.x - expected_x), 0.8)
 
     def test_T_PY18_tracker_ignores_stale_map_hotspots_for_dynamic_sources(self):
         """T-PY18: 动态场景不能从过期热图峰继续生成当前源检测."""
@@ -653,32 +639,17 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertLess(abs(math.atan2(math.sin(sector.yaw - math.pi / 4.0),
                                        math.cos(sector.yaw - math.pi / 4.0))), math.radians(35.0))
 
-    def test_T_PY21_dynamic_scenario_files_load_and_move(self):
-        """T-PY21: 多情景 YAML 覆盖静态、线性、环形、出现/消失、随机/航点运动."""
+    def test_T_PY21_static_scenarios_are_stationary_and_continuous(self):
         scenario_dir = WORKSPACE / 'src/thermal_robot/thermal_bringup/config/scenarios'
-        scenario_paths = sorted(scenario_dir.glob('*.yaml'))
-        self.assertGreaterEqual(len(scenario_paths), 8)
-        moved = 0
-        intermittent = 0
-        source_counts = set()
-        for path in scenario_paths:
+        counts = set()
+        for path in scenario_dir.glob('*.yaml'):
             scenario = load_scenario_file(str(path))
-            source_counts.add(len(scenario.sources))
-            self.assertGreaterEqual(len(scenario.sources), 2, path.name)
-            states0 = scenario.all_states(0.0)
-            states60 = scenario.all_states(60.0)
-            for src0, src60 in zip(states0, states60):
-                if math.hypot(src60.x-src0.x, src60.y-src0.y) > 0.25:
-                    moved += 1
-                if src0.active != src60.active:
-                    intermittent += 1
-                self.assertGreaterEqual(src60.amplitude, 0.0)
-                self.assertGreater(src60.sigma_m, 0.0)
-        limited = load_scenario_file(str(scenario_dir / 'dynamic_five_sources.yaml'), num_sources=3)
+            counts.add(len(scenario.sources))
+            self.assertEqual(scenario.all_states(0.), scenario.all_states(3600.))
+            self.assertTrue(all(s.active for s in scenario.all_states(3600.)))
+        self.assertTrue({2, 3, 5}.issubset(counts))
+        limited = load_scenario_file(str(scenario_dir / 'static_five_sources.yaml'), num_sources=3)
         self.assertEqual(len(limited.sources), 3)
-        self.assertTrue({2, 3, 4, 5}.issubset(source_counts))
-        self.assertGreaterEqual(moved, 4)
-        self.assertGreaterEqual(intermittent, 1)
 
     def test_T_PY22_world_files_parse_and_launch_selects_world_file(self):
         """T-PY22: 多仿真 world 资产可解析，launch 支持按 world_file 切换."""
@@ -728,18 +699,18 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         extended_worlds = {case.world.name for case in module.EXTENDED_CASES}
         extended_scenarios = {case.scenario.name for case in module.EXTENDED_CASES}
         self.assertGreaterEqual(len(extended_worlds), 6)
-        self.assertGreaterEqual(len(extended_scenarios), 6)
+        self.assertGreaterEqual(len(extended_scenarios), 4)
 
         variable_cases = module.VARIABLE_SOURCE_CASES
         variable_counts = {len(load_scenario_file(str(case.scenario)).sources) for case in variable_cases}
-        self.assertTrue({2, 4, 5}.issubset(variable_counts))
+        self.assertTrue({2, 3, 5}.issubset(variable_counts))
         self.assertGreaterEqual(len({case.world.name for case in variable_cases}), 3)
 
         full_cases = module._full_cases()
         full_worlds = {case.world.name for case in full_cases}
         full_scenarios = {case.scenario.name for case in full_cases}
         self.assertGreaterEqual(len(full_worlds), 6)
-        self.assertGreaterEqual(len(full_scenarios), 9)
+        self.assertGreaterEqual(len(full_scenarios), 4)
         self.assertEqual(len(full_cases), len(full_worlds) * len(full_scenarios))
         runner_text = runner_path.read_text()
         self.assertIn('GAZEBO_MASTER_URI', runner_text)
@@ -787,7 +758,6 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('post_confirm_immediate_departure', params_text)
         self.assertIn('thermal_pose_source: "odom"', params_text)
         self.assertIn('pose_source:        "odom"', params_text)
-        self.assertIn('num_sources:       -1', params_text)
         self.assertIn('_start_post_confirm_departure', controller_text)
         self.assertIn('goal_map_x = self._map_x + c * dx - s * dy', controller_text)
         self.assertIn('_departure_progress_best_d', controller_text)

@@ -11,8 +11,4 @@ float32 sigma
 float32 existence_probability
 float32 confidence
 uint32 observations
-geometry_msgs/Vector3 velocity
 float32 age_s
-float32 velocity_variance
-uint32 reacquisitions
-float32 last_reacquisition_s

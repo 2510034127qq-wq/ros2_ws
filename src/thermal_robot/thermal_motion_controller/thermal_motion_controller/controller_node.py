@@ -63,7 +63,6 @@ from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Float32
 from thermal_interfaces.msg import GradientArray, SourceEstimateArray, ThermalMap
 from thermal_motion_controller.planning import (
     PlannerWeights,
@@ -79,9 +78,7 @@ from thermal_motion_controller.navigation_policy import (
     decide_goal_action,
     forward_clearance,
 )
-from thermal_motion_controller import clearance as clearance_mod
 from thermal_motion_controller.belief import detection_information
-from thermal_motion_controller.revisit import RevisitScheduler, RevisitParams
 from thermal_motion_controller.runtime_policy import (
     slow_output_usable, surface_approach_waypoint, CoverageSweep, exploration_goal_due,
     ExplorationProgress)
@@ -113,7 +110,6 @@ STATE_ESCAPE        = 'ESCAPE'
 STATE_FRONTIER_NAV  = 'FRONTIER_NAV'
 STATE_COARSE_SURVEY = 'COARSE_SURVEY'
 STATE_SURVEY_PAUSE  = 'SURVEY_PAUSE'
-STATE_DONE          = 'DONE'
 
 NAV2_IDLE     = 'idle'
 NAV2_SENDING  = 'sending'
@@ -279,13 +275,11 @@ class ControllerNode(Node):
         self.declare_parameter('relocate_dist',              3.0)
         self.declare_parameter('relocate_lin_vel',           0.2)
         self.declare_parameter('peak_hold_s',                1.5)
-        self.declare_parameter('revisit_radius',             2.0)
+        self.declare_parameter('known_source_radius', 2.0)
         self.declare_parameter('source_repulsion_k',         0.8)
         self.declare_parameter('source_repulsion_min_dist',  0.5)
         self.declare_parameter('source_exclusion_radius',    2.0)
         self.declare_parameter('min_escape_dist',            2.0)
-        self.declare_parameter('num_sources',               -1)
-        self.declare_parameter('no_new_source_timeout',    180.0)
         self.declare_parameter('spawn_x',                   -6.0)
         self.declare_parameter('spawn_y',                    0.0)
         self.declare_parameter('thermal_pose_source',       'odom')
@@ -328,13 +322,6 @@ class ControllerNode(Node):
         self.declare_parameter('levy_post_confirm_step',     10.0)
         self.declare_parameter('random_seed',                 0)
         self.declare_parameter('strategy',                    'full')
-        self.declare_parameter('clearance_source_rate_per_m2', 0.01)
-        self.declare_parameter('clearance_p_detect_per_sector', 0.7)
-        self.declare_parameter('clearance_residual_thresh', 1.5)
-        self.declare_parameter('clearance_epsilon', 0.05)
-        self.declare_parameter('clearance_eval_interval_s', 10.0)
-        self.declare_parameter('clearance_domain_radius_m', 12.0)
-        self.declare_parameter('clearance_terminate', False)
         self.declare_parameter('residual_planner_min_evidence', 1.5)
         self.declare_parameter('residual_planner_footprint_radius', 2.0)
         self.declare_parameter('residual_planner_top_k', 64)
@@ -423,13 +410,11 @@ class ControllerNode(Node):
         self._reloc_dist   = float(g('relocate_dist').value)
         self._reloc_lin    = float(g('relocate_lin_vel').value)
         self._peak_hold    = float(g('peak_hold_s').value)
-        self._rev_r        = float(g('revisit_radius').value)
+        self._rev_r        = float(g('known_source_radius').value)
         self._rep_k        = float(g('source_repulsion_k').value)
         self._rep_min      = float(g('source_repulsion_min_dist').value)
         self._excl_r       = float(g('source_exclusion_radius').value)
         self._min_esc_dist = float(g('min_escape_dist').value)
-        self._num_src      = int(g('num_sources').value)
-        self._no_new_t     = float(g('no_new_source_timeout').value)
         self._spawn_x      = float(g('spawn_x').value)
         self._spawn_y      = float(g('spawn_y').value)
         self._pose_source  = str(g('thermal_pose_source').value).lower()
@@ -476,10 +461,8 @@ class ControllerNode(Node):
             self.get_logger().warn(f'unknown strategy={self._strategy_mode}, using full')
             self._strategy_mode = 'full'
         for name,default in [('sensor_model','a'),('slow_timeout_s',3.),
-                             ('revisit_enabled',True),('revisit_stale_s',8.),('revisit_cooldown_s',15.),
-                             ('revisit_min_probability',.25),
-                             ('revisit_max_consecutive',2),('residual_enabled',True),
-                             ('revisit_prediction_horizon_s',5.),('revisit_max_age_s',90.),
+
+                             ('residual_enabled',True),
                              ('posterior_information_weight',1.),('surface_standoff_m',1.2),
                              ('posterior_detection_probability',.85),('posterior_false_alarm_probability',.03),
                              ('posterior_measurement_variance',.2),('surface_robot_radius_m',.35),
@@ -493,23 +476,14 @@ class ControllerNode(Node):
                              ('exploration_turn_weight',.25),
                              ('surface_source_max_age_s',1.5),('thermal_image_width',64),
                              ('thermal_image_height',48),('thermal_fov_x_m',4.),('thermal_fov_y_m',3.),
-                             ('clearance_calibrated',False),('clearance_amplitude_min_c',4.),
-                             ('clearance_amplitude_prior_mean_c',15.),('clearance_evidence_memory_s',60.),
-                             ('clearance_detection_noise_c',1.),('clearance_detection_distance_scale_m',5.),
-                             ('clearance_source_birth_rate_m2_s',.00001),('gp_max_samples',64),
+
+                             ('gp_max_samples',64),
                              ('gp_max_candidates',256),('gp_length_scale_m',2.),('gp_beta',2.),
                              ('gp_signal_std_c',12.),('gp_noise_std_c',1.),('gp_travel_weight',.2)]:
             self.declare_parameter(name,default)
         self._sensor_model=str(g('sensor_model').value)
         self._slow_timeout=float(g('slow_timeout_s').value)
         self._slow_msg=None;self._slow_t=-float('inf')
-        self._revisit=RevisitScheduler(RevisitParams(
-            stale_s=float(g('revisit_stale_s').value),cooldown_s=float(g('revisit_cooldown_s').value),
-            max_consecutive=int(g('revisit_max_consecutive').value),
-            prediction_horizon_s=float(g('revisit_prediction_horizon_s').value),
-            min_probability=float(g('revisit_min_probability').value),
-            max_age_s=float(g('revisit_max_age_s').value)))
-        self._revisit_enabled=bool(g('revisit_enabled').value)
         self._residual_enabled=bool(g('residual_enabled').value)
         self._posterior_weight=float(g('posterior_information_weight').value)
         self._posterior_pd=float(g('posterior_detection_probability').value)
@@ -539,24 +513,6 @@ class ControllerNode(Node):
         self._explore_progress=ExplorationProgress(float(g('exploration_stall_s').value),
             float(g('exploration_retry_s').value),float(g('exploration_failed_radius_m').value))
         self._source_registry={}
-        self._clearance_params = clearance_mod.ClearanceParams(
-            source_rate_per_m2=float(g('clearance_source_rate_per_m2').value),
-            p_detect_per_sector=float(g('clearance_p_detect_per_sector').value),
-            residual_block_thresh=float(g('clearance_residual_thresh').value),
-            epsilon=float(g('clearance_epsilon').value),
-            domain_radius_m=float(g('clearance_domain_radius_m').value),
-        )
-        self._clearance_params.amplitude_min_c=float(g('clearance_amplitude_min_c').value)
-        self._clearance_params.detection_noise_c=float(g('clearance_detection_noise_c').value)
-        self._clearance_params.detection_distance_scale_m=float(g('clearance_detection_distance_scale_m').value)
-        self._clearance_params.amplitude_prior_mean_c=float(g('clearance_amplitude_prior_mean_c').value)
-        self._clearance_params.evidence_memory_s=float(g('clearance_evidence_memory_s').value)
-        self._clearance_params.source_birth_rate_m2_s=float(g('clearance_source_birth_rate_m2_s').value)
-        self._clearance_calibrated=bool(g('clearance_calibrated').value)
-        self._clearance_interval = float(g('clearance_eval_interval_s').value)
-        self._clearance_terminate = bool(g('clearance_terminate').value)
-        self._clearance_last_eval = 0.0
-        self._clearance_value = None
         self._residual_planner_min_evidence = float(
             g('residual_planner_min_evidence').value)
         self._residual_planner_footprint_radius = float(
@@ -824,7 +780,6 @@ class ControllerNode(Node):
         )
         self.create_subscription(OccupancyGrid, '/map', self._occ_map_cb, occ_qos)
         self.create_subscription(BeliefState,'/thermal/belief',self._belief_cb,3)
-        self._clearance_pub = self.create_publisher(Float32, '/thermal/clearance', 10)
         self._pub   = self.create_publisher(Twist, '/cmd_vel', 10)
         self._last_plan_ms=0.
         self._runtime_timer=self.create_timer(2.,self._report_runtime)
@@ -834,7 +789,7 @@ class ControllerNode(Node):
             f'controller_node v31 | FIX: SLAM coord offset + COARSE fallback + Nav2 frame | '
             f'COARSE→Nav2+fallback | FINE→direct /cmd_vel | '
             f'pose_source={self._pose_source} | '
-            f'spawn=({self._spawn_x},{self._spawn_y}) | num_sources={self._num_src}')
+            f'spawn=({self._spawn_x},{self._spawn_y}) | static inspection')
         self.get_logger().info(
             f'strategy={self._strategy_mode} random_seed={self._random_seed}')
 
@@ -1192,11 +1147,6 @@ class ControllerNode(Node):
                 self._thermal_map['view_sectors'] = np.asarray(
                     msg.view_sectors, dtype=np.uint8).reshape(shape)
             self._thermal_map_t = time.monotonic()
-            if self._strategy_mode in ('residual', 'fast', 'dual', 'gp_ucb'):
-                now_mono = time.monotonic()
-                if now_mono - self._clearance_last_eval >= self._clearance_interval:
-                    self._clearance_last_eval = now_mono
-                    self._evaluate_clearance()
         except ValueError as exc:
             if not hasattr(self, '_map_shape_warned'):
                 self._map_shape_warned = True
@@ -1296,20 +1246,6 @@ class ControllerNode(Node):
             reach_fn = (lambda x0, y0, x1, y1:
                         fr_visibility.line_reachable_plannable(
                             self._occ_view, x0, y0, x1, y1))
-        if self._strategy_mode in ('fast','dual') and self._revisit_enabled:
-            latency=max(0.,time.monotonic()-self._tracker_sources_t)
-            revisit_sources=[dict(t,message_age_s=latency,age_s=t.get('age_s',0)+latency)
-                             for t in self._tracker_sources
-                             if self._explore_progress.allowed(t['x'],t['y'],time.monotonic())]
-            revisit=self._revisit.select(revisit_sources,time.monotonic(),(self._wx,self._wy),reach_fn)
-            if revisit is not None:
-                # A close revisit is served by local observation, not an already
-                # arrived Nav2 waypoint. The next cycle remains free to explore.
-                distance=math.hypot(revisit['x']-self._wx,revisit['y']-self._wy)
-                if distance>=effective_min_d:
-                    return StrategyTarget(x=revisit['x'],y=revisit['y'],score=revisit['score'],
-                        reason=revisit['reason'],execution_hint=EXECUTION_NAV2_PREFERRED,
-                        metadata={'label':'revisit','direct_safe':self._target_path_known_free(revisit['x'],revisit['y'])})
         plan_t0 = time.monotonic()
         if self._strategy_mode=='gp_ucb':
             target=self._gp.select(m,(self._wx,self._wy),effective_min_d,self._survey_wp_max_d,
@@ -1363,46 +1299,6 @@ class ControllerNode(Node):
                       'direct_safe': direct_safe},
         )
 
-    def _evaluate_clearance(self):
-        m = self._thermal_map
-        if m is None or 'view_state' not in m or 'view_sectors' not in m:
-            return
-        resid = self._residual_snapshot()
-        h, w = m['height'], m['width']
-        yy, xx = np.mgrid[0:h, 0:w]
-        cwx = m['origin_x'] + (xx.astype(np.float32) + 0.5) * m['resolution']
-        cwy = m['origin_y'] + (yy.astype(np.float32) + 0.5) * m['resolution']
-        free = (np.hypot(cwx - self._spawn_x, cwy - self._spawn_y)
-                <= self._clearance_params.domain_radius_m)
-        if self._occ_view is not None:
-            free &= ~fr_visibility.occupied_at(self._occ_view, cwx, cwy)
-        t0 = time.monotonic()
-        p_clear = clearance_mod.clearance_probability(
-            m['view_state'], m['view_sectors'], m['resolution'] ** 2,
-            self._clearance_params, residual=resid, free_mask=free)
-        if self._strategy_mode in ('fast','dual','gp_ucb'):
-            slow=self._active_belief()
-            candidates=[] if slow is None else [float(src.existence_probability) for src in slow.sources
-                                                if src.status=='candidate']
-            p_clear,_=clearance_mod.clearance_with_history(m['view_state'],m['view_sectors'],
-                m['last_seen_age_s'],m['resolution']**2,self._clearance_params,
-                residual=resid,free_mask=free,candidate_probabilities=candidates,
-                detection_distance_m=np.nan_to_num(m['last_view_distance_m'],nan=self._clearance_params.domain_radius_m))
-        eval_ms = (time.monotonic() - t0) * 1000.0
-        self._clearance_value = p_clear
-        out = Float32()
-        out.data = float(p_clear)
-        self._clearance_pub.publish(out)
-        self.get_logger().info(
-            f'[CLEARANCE] p_no_undetected={p_clear:.4f} '
-            f'eps={self._clearance_params.epsilon} eval_ms={eval_ms:.1f}')
-        if (self._clearance_terminate and self._clearance_calibrated
-                and p_clear >= 1.0 - self._clearance_params.epsilon
-                and self._found_sources):
-            self._cancel_nav2_goal()
-            self._state=STATE_DONE
-            self._pub.publish(Twist())
-            self.get_logger().info('[CLEARANCE_DONE_SIGNAL] threshold reached')
 
     def _belief_cb(self,msg):
         self._slow_msg=msg
@@ -1441,8 +1337,6 @@ class ControllerNode(Node):
         return gain
 
     def _surface_timer(self,now):
-        if self._state==STATE_DONE:
-            self._pub.publish(Twist());return
         if self._sensor_model == 'b' and self._surface_nav_goal is None:
             sweeping=self._camera_sweep.step((self._wx,self._wy),self._odom_yaw,now)
             if sweeping:
@@ -1549,7 +1443,7 @@ class ControllerNode(Node):
                 'probability': float(src.existence_probability),
                 'confidence': float(src.confidence),
                 'observations': int(src.observations),
-                'vx':float(src.velocity.x),'vy':float(src.velocity.y),'age_s':float(src.age_s),
+                'age_s':float(src.age_s),
                 'covariance_xx':float(src.covariance_xx),'covariance_yy':float(src.covariance_yy),
                 'sigma':float(src.sigma),
             })
@@ -1820,7 +1714,7 @@ class ControllerNode(Node):
         if not self._calib_done or not self._peak_armed:
             return False
         if self._state in (STATE_CONVERGE, STATE_SAMPLE, STATE_AT_PEAK,
-                           STATE_RELOCATE, STATE_ESCAPE, STATE_DONE,
+                           STATE_RELOCATE, STATE_ESCAPE,
                            STATE_COARSE_SURVEY, STATE_SURVEY_PAUSE,
                            STATE_DEPARTURE):
             return False
@@ -2086,7 +1980,7 @@ class ControllerNode(Node):
         self._state = STATE_DEPARTURE
         self._state_t = now
         self.get_logger().info(
-            f'[AT_PEAK→DEPARTURE] {n_found}/{self._num_src or "inf"} '
+            f'[AT_PEAK→DEPARTURE] {n_found} confirmed '
             f'→({self._departure_wp[0]:.1f},{self._departure_wp[1]:.1f})')
 
     def _exec_departure(self, now: float):
@@ -2564,18 +2458,6 @@ class ControllerNode(Node):
             return
         self._update_armed(T)
 
-        # ─ DONE ──────────────────────────────────────────────────────────
-        if self._state == STATE_DONE:
-            self._pub.publish(Twist()); return
-        if self._num_src < 0 and n_found > 0:
-            if (now - self._last_found_t) > self._no_new_t:
-                self._cancel_nav2_goal()
-                self._state = STATE_DONE
-                self.get_logger().info(
-                    f'[ALL DONE] {n_found} sources found '
-                    f'path={self._path_length:.2f}m t={elapsed:.1f}s')
-                self._pub.publish(Twist()); return
-
         # ─ SAMPLE (highest priority) ──────────────────────────────────────
         if self._state == STATE_SAMPLE:
             self._exec_sample(now); return
@@ -2588,25 +2470,18 @@ class ControllerNode(Node):
         if self._state == STATE_AT_PEAK:
             self._pub.publish(Twist())
             if now - self._state_t >= self._peak_hold:
-                if self._num_src > 0 and n_found >= self._num_src:
-                    self._cancel_nav2_goal()
-                    self._state = STATE_DONE
-                    self.get_logger().info(
-                        f'[ALL DONE] {n_found} sources '
-                        f'path={self._path_length:.2f}m t={elapsed:.1f}s')
-                else:
-                    if self._post_confirm_immediate_departure and self._found_sources:
-                        self._start_post_confirm_departure(now, n_found)
-                        return
-                    self._state = STATE_RELOCATE; self._state_t = now
-                    self._move_start = (self._wx, self._wy)
-                    self._locked_yaw = self._escape_yaw()
-                    self._peak_cand_t = None; self._temp_max_seen = self._ambient_est
-                    self._temp_win.clear(); self._search_rounds = 0
-                    self._esc_loop_count = 0
-                    self.get_logger().info(
-                        f'[→RELOCATE] yaw={math.degrees(self._locked_yaw):.0f}deg '
-                        f'{n_found}/{self._num_src or "inf"}')
+                if self._post_confirm_immediate_departure and self._found_sources:
+                    self._start_post_confirm_departure(now, n_found)
+                    return
+                self._state = STATE_RELOCATE; self._state_t = now
+                self._move_start = (self._wx, self._wy)
+                self._locked_yaw = self._escape_yaw()
+                self._peak_cand_t = None; self._temp_max_seen = self._ambient_est
+                self._temp_win.clear(); self._search_rounds = 0
+                self._esc_loop_count = 0
+                self.get_logger().info(
+                    f'[→RELOCATE] yaw={math.degrees(self._locked_yaw):.0f}deg '
+                    f'{n_found} confirmed')
             return
 
         # ─ SURVEY_PAUSE ───────────────────────────────────────────────────
@@ -2785,7 +2660,7 @@ class ControllerNode(Node):
                 f'adapt_pk={self._adapt_pk_delta():.1f}C guard={guard_r:.0f}s '
                 f'cold={cold_t:.0f}s/{self._frontier_cold_to:.0f}s '
                 f'nav2={self._nav2_state} '
-                f'found={n_found}/{self._num_src} path={self._path_length:.2f}m '
+                f'found={n_found} path={self._path_length:.2f}m '
                 f'frontier={ft} nov={nov:.2f}')
 
 

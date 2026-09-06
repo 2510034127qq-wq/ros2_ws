@@ -80,9 +80,6 @@ PHASE0_SCENARIO_CLASSES = {
     "static2": SCENARIOS / "static_two_sources.yaml",
     "static3": CONFIG_B,
     "static5": SCENARIOS / "static_five_sources.yaml",
-    "dyn4": SCENARIOS / "dynamic_four_sources.yaml",
-    "dyn5": SCENARIOS / "dynamic_five_sources.yaml",
-    "birthdeath": SCENARIOS / "dynamic_appear_disappear_sources.yaml",
 }
 
 
@@ -95,22 +92,22 @@ def phase0_cases() -> List[MatrixCase]:
 
 
 REPRESENTATIVE_CASES = [
+    MatrixCase("obstacle_static2", WORLDS / "thermal_scene_obstacle_field.world", SCENARIOS / "static_two_sources.yaml"),
+    MatrixCase("corridor_static5", WORLDS / "thermal_scene_corridor_rooms.world", SCENARIOS / "static_five_sources.yaml"),
+    MatrixCase("mixed_offset", WORLDS / "thermal_scene_mixed_rooms.world", SCENARIOS / "static_offset_sources.yaml"),
     MatrixCase("open_config_b", WORLDS / "thermal_scene_nav.world", CONFIG_B),
-    MatrixCase("obstacle_linear", WORLDS / "thermal_scene_obstacle_field.world", SCENARIOS / "dynamic_linear_sources.yaml"),
-    MatrixCase("corridor_appear", WORLDS / "thermal_scene_corridor_rooms.world", SCENARIOS / "dynamic_appear_disappear_sources.yaml"),
-    MatrixCase("mixed_waypoint", WORLDS / "thermal_scene_mixed_rooms.world", SCENARIOS / "dynamic_waypoint_random_sources.yaml"),
 ]
 
 EXTENDED_CASES = [
     *REPRESENTATIVE_CASES,
-    MatrixCase("zigzag_circular", WORLDS / "thermal_scene_zigzag_corridors.world", SCENARIOS / "dynamic_circular_sources.yaml"),
+    MatrixCase("zigzag_static2", WORLDS / "thermal_scene_zigzag_corridors.world", SCENARIOS / "static_two_sources.yaml"),
     MatrixCase("islands_static_offset", WORLDS / "thermal_scene_sparse_islands.world", SCENARIOS / "static_offset_sources.yaml"),
 ]
 
 VARIABLE_SOURCE_CASES = [
+    MatrixCase("corridor_static5", WORLDS / "thermal_scene_corridor_rooms.world", SCENARIOS / "static_five_sources.yaml"),
+    MatrixCase("mixed_static3", WORLDS / "thermal_scene_mixed_rooms.world", CONFIG_B),
     MatrixCase("open_static_2src", WORLDS / "thermal_scene_nav.world", SCENARIOS / "static_two_sources.yaml"),
-    MatrixCase("mixed_dynamic_4src", WORLDS / "thermal_scene_mixed_rooms.world", SCENARIOS / "dynamic_four_sources.yaml"),
-    MatrixCase("zigzag_dynamic_5src", WORLDS / "thermal_scene_zigzag_corridors.world", SCENARIOS / "dynamic_five_sources.yaml"),
 ]
 
 FULL_WORLDS = [
@@ -124,13 +121,8 @@ FULL_WORLDS = [
 FULL_SCENARIOS = [
     CONFIG_B,
     SCENARIOS / "static_offset_sources.yaml",
-    SCENARIOS / "dynamic_linear_sources.yaml",
-    SCENARIOS / "dynamic_circular_sources.yaml",
-    SCENARIOS / "dynamic_appear_disappear_sources.yaml",
-    SCENARIOS / "dynamic_waypoint_random_sources.yaml",
     SCENARIOS / "static_two_sources.yaml",
-    SCENARIOS / "dynamic_four_sources.yaml",
-    SCENARIOS / "dynamic_five_sources.yaml",
+    SCENARIOS / "static_five_sources.yaml",
 ]
 
 
@@ -510,8 +502,6 @@ def load_resumable_result(
     if not isinstance(counts, dict):
         return None
     required_counts = list(REQUIRED_PIPELINE_COUNTS)
-    if strategy in ("residual", "fast", "dual", "gp_ucb"):
-        required_counts.append("clearance")
     try:
         result_count_values = {
             key: int(counts.get(key, 0) or 0) for key in required_counts}
@@ -526,8 +516,6 @@ def load_resumable_result(
         "launch.log",
     ]
     required_artifacts.extend(COUNT_CSV_ARTIFACTS.values())
-    if strategy in ("residual", "fast", "dual", "gp_ucb"):
-        required_artifacts.append("clearance.csv")
     if any(not (Path(run_dir) / filename).exists()
            for filename in required_artifacts):
         return None
@@ -590,10 +578,6 @@ def load_resumable_result(
         return None
     if (Path(run_dir) / "launch.log").stat().st_size <= 0:
         return None
-    if strategy in ("residual", "fast", "dual", "gp_ucb"):
-        if (_csv_data_row_count(Path(run_dir) / "clearance.csv")
-                != result_count_values["clearance"]):
-            return None
     return result
 
 
@@ -730,8 +714,6 @@ def run_case(
     attribution = _load_json(run_dir / "attribution.json")
     counts = metadata.get("counts", {})
     required_counts = list(REQUIRED_PIPELINE_COUNTS)
-    if strategy in ("residual", "fast", "dual", "gp_ucb"):
-        required_counts.append("clearance")
     missing_counts = [key for key in required_counts if int(counts.get(key, 0) or 0) <= 0]
     recall = float(summary.get("source_recall", 0.0) or 0.0)
     duplicates = int(summary.get("duplicate_confirmations", 0) or 0)

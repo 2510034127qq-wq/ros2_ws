@@ -91,7 +91,7 @@ def generate_launch_description():
     sensor_model=LaunchConfiguration('sensor_model',default='a')
     belief_mode=LaunchConfiguration('belief_mode',default='online')
     software_params=LaunchConfiguration('software_params',default=os.path.join(bringup_dir,'config','multisource.yaml'))
-    motion_model=ParameterValue(PythonExpression(["'kalman' if '",strategy,"' in ('fast','dual','gp_ucb') else 'legacy'"]),value_type=str)
+    estimator_model=ParameterValue(PythonExpression(["'kalman' if '",strategy,"' in ('fast','dual','gp_ucb') else 'legacy'"]),value_type=str)
     fusion_memory=ParameterValue(PythonExpression(["3.0 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.e9"]),value_type=float)
     shared={'use_sim_time':use_sim_t,'sensor_model':sensor_model}
     scenario_jitter = LaunchConfiguration('scenario_jitter_std_m', default='0.0')
@@ -328,7 +328,7 @@ def generate_launch_description():
                 package='thermal_motion_controller',
                 executable='source_tracker_node',
                 name='source_tracker_node',
-                parameters=[params_file,software_params,shared,{'motion_model':motion_model,'strategy':strategy,
+                parameters=[params_file,software_params,shared,{'estimator_model':estimator_model,'strategy':strategy,
                     'gate_m':ParameterValue(PythonExpression(["3.0 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.25"]),value_type=float),
                     'max_detection_age_s':ParameterValue(PythonExpression(["1.5 if '",strategy,"' in ('fast','dual','gp_ucb') else 8.0"]),value_type=float),
                     'merge_radius_m':ParameterValue(PythonExpression(["0.5 if '",strategy,"' in ('fast','dual','gp_ucb') else 1.0"]),value_type=float)}],

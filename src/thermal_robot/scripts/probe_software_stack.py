@@ -13,8 +13,7 @@ from sensor_msgs.msg import Image,LaserScan
 from nav_msgs.msg import Odometry,Path as NavPath
 from geometry_msgs.msg import Twist
 from thermal_interfaces.msg import ThermalMap,SourceEstimateArray,BeliefState,GradientArray,ThermalField
-from std_msgs.msg import Float32
-from gazebo_msgs.srv import GetEntityState
+from gazebo_msgs.msg import ModelStates
 
 
 class Probe(Node):
@@ -22,36 +21,36 @@ class Probe(Node):
         super().__init__('software_contract_probe')
         self.out=out;self.counts=collections.Counter();self.health=collections.Counter()
         self.sources=set();self.belief_sources=set();self.cpu=[];self.rows=[];self.positions=[]
-        self.max_hot=None;self.max_clear=0;self.nonzero_cmd=0;self.valid_depth=0
+        self.max_hot=None;self.max_observed_cells=0;self.nonzero_cmd=0;self.valid_depth=0
         self.snapshots={};self.source_rows=[];self.truth=[];self.truth_rows=[];self.physical_truth=[]
         self.fresh_location_errors=[];self.inactive_confirmations=0
         self.truth_errors=[];self.last_received={};self.start=time.monotonic()
         self.commands=[];self.yaws=[]
-        self.body_errors=[];self.body_failures=[];self.body_index=0;self.body_pending=None
-        self.body_client=self.create_client(GetEntityState,'/thermal_scene/get_entity_state')
-        self.create_timer(1.,self.check_body)
+        self.body_errors=[];self.body_failures=[]
+        self.create_subscription(ModelStates,'/thermal_scene/model_states',
+                                 self.check_body,qos_profile_sensor_data)
         subscriptions={'raw':(Image,'/sim/thermal_raw'),'filtered':(Image,'/thermal/filtered'),
             'depth':(Image,'/thermal/depth'),'field':(ThermalField,'/thermal/field'),
             'gradient':(GradientArray,'/thermal/gradient'),'map':(ThermalMap,'/thermal/map'),
             'sources':(SourceEstimateArray,'/thermal/sources'),'belief':(BeliefState,'/thermal/belief'),
             'odom':(Odometry,'/odom'),'scan':(LaserScan,'/scan'),'cmd_vel':(Twist,'/cmd_vel'),
-            'clearance':(Float32,'/thermal/clearance'),'plan':(NavPath,'/plan'),
+            'plan':(NavPath,'/plan'),
             'truth':(SourceEstimateArray,'/sim/thermal_sources_truth')}
         for name,(cls,topic) in subscriptions.items():
             self.create_subscription(cls,topic,lambda msg,name=name:self.receive(name,msg),qos_profile_sensor_data)
 
-    def check_body(self):
-        if not self.truth or not self.body_client.service_is_ready():return
-        if self.body_pending is not None and not self.body_pending.done():return
-        target=self.truth[self.body_index%len(self.truth)];self.body_index+=1
-        request=GetEntityState.Request();request.name='thermal_body_'+target.id;request.reference_frame='world'
-        self.body_pending=self.body_client.call_async(request)
-        def received(future):
-            result=future.result()
-            if not result.success:self.body_failures.append(request.name);return
-            position=result.state.pose.position
-            self.body_errors.append(float(np.hypot(position.x-target.position.x,position.y-target.position.y)))
-        self.body_pending.add_done_callback(received)
+    def check_body(self,msg):
+        # Static bodies can be checked together against Gazebo's physical state;
+        # no asynchronous per-body service request needs to be held outstanding.
+        poses=dict(zip(msg.name,msg.pose))
+        for target in self.physical_truth:
+            name='thermal_body_'+target.id
+            if name not in poses:
+                self.body_failures.append(name)
+                continue
+            position=poses[name].position
+            self.body_errors.append(float(np.hypot(
+                position.x-target.position.x,position.y-target.position.y)))
 
     def receive(self,name,msg):
         self.counts[name]+=1
@@ -66,7 +65,7 @@ class Probe(Node):
             temp=np.asarray(msg.temperature_mean).reshape(msg.height,msg.width)
             self.snapshots['map']=temp
             self.snapshots['map_geometry']=np.array([msg.origin_x,msg.origin_y,msg.resolution])
-            self.max_clear=max(self.max_clear,int(np.count_nonzero(msg.visit_count)))
+            self.max_observed_cells=max(self.max_observed_cells,int(np.count_nonzero(msg.visit_count)))
             self.map_type=msg.measurement_type
         elif name=='belief':
             self.health[msg.health]+=1;self.cpu.append(float(msg.compute_ms))
@@ -76,8 +75,8 @@ class Probe(Node):
         elif name=='sources':
             self.sources.update(s.id for s in msg.sources if s.status=='confirmed')
             for s in msg.sources:self.source_rows.append(dict(t=time.monotonic(),id=s.id,status=s.status,
-                x=s.position.x,y=s.position.y,vx=s.velocity.x,vy=s.velocity.y,p=s.existence_probability,
-                age=s.age_s,reacquisitions=s.reacquisitions,last_reacquisition_gap_s=s.last_reacquisition_s))
+                x=s.position.x,y=s.position.y,p=s.existence_probability,
+                age=s.age_s))
             for s in msg.sources:
                 if s.status=='confirmed' and self.truth:
                     self.truth_errors.append(min(np.hypot(s.position.x-t.position.x,
@@ -104,11 +103,10 @@ class Probe(Node):
 
     def save(self,args):
         required=['raw','filtered','field','gradient','map','sources','odom','scan','cmd_vel']
-        if args.strategy in ('residual','fast','dual','gp_ucb'):required+=['clearance']
         if args.sensor_model=='b':required+=['depth']
         if args.belief_mode!='off':required+=['belief']
         failures=[f'missing:{name}' for name in required if self.counts[name]==0]
-        if self.max_clear==0:failures.append('no_map_observations')
+        if self.max_observed_cells==0:failures.append('no_map_observations')
         if args.sensor_model=='b' and self.valid_depth==0:failures.append('no_valid_depth')
         if args.sensor_model=='b':
             if not self.body_errors:failures.append('no_physical_surface_geometry')
@@ -117,15 +115,14 @@ class Probe(Node):
         if args.belief_mode!='off' and self.health[args.expected_health]==0:
             failures.append('belief_never_'+args.expected_health)
         for name in required:
-            # Clearance is deliberately evaluated every 10 s in params.yaml.
-            timeout_s=30. if name=='clearance' else 5.
+            timeout_s=5.
             if name in self.last_received and time.monotonic()-self.last_received[name]>timeout_s:
                 failures.append('stopped:'+name)
         if self.nonzero_cmd==0:failures.append('no_motion_command')
         distance=float(np.linalg.norm(np.diff(np.asarray(self.positions),axis=0),axis=1).sum()) if len(self.positions)>1 else 0.
         if distance<args.min_path_m:failures.append('insufficient_actual_motion')
         report=dict(passed=not failures,failures=failures,counts=dict(self.counts),belief_health=dict(self.health),
-                    max_observed_cells=self.max_clear,valid_depth_pixels=self.valid_depth,
+                    max_observed_cells=self.max_observed_cells,valid_depth_pixels=self.valid_depth,
                     confirmed_ids=sorted(self.sources),belief_ids=sorted(self.belief_sources),
                     belief_compute_ms_p99=float(np.percentile(self.cpu,99)) if self.cpu else None,
                     path_length_m=distance,nonzero_commands=self.nonzero_cmd,max_temperature_c=self.max_hot,
@@ -138,7 +135,7 @@ class Probe(Node):
                     confirmed_nearest_truth_error_max_m=float(max(self.truth_errors)) if self.truth_errors else None,
                     fresh_nearest_physical_source_error_p95_m=float(np.percentile(self.fresh_location_errors,95)) if self.fresh_location_errors else None,
                     confirmed_inactive_nearest_frames=self.inactive_confirmations,
-                    note='Active truth distance includes predicted tracks after emission stops. Physical source distance includes inactive bodies. Neither is matched precision or recall.')
+                    note='Nearest-source distances are diagnostics, not matched precision or recall; use detection_metrics.json for physical-source matching.')
         (self.out/'probe.json').write_text(json.dumps(report,indent=2))
         (self.out/'belief.json').write_text(json.dumps(self.rows,indent=2))
         (self.out/'sources.json').write_text(json.dumps(self.source_rows,indent=2))

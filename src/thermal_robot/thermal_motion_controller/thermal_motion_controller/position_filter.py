@@ -1,41 +1,37 @@
-"""Constant-velocity Gaussian filtering without ROS dependencies."""
+"""Stationary-source Gaussian position filtering without ROS dependencies."""
 from dataclasses import dataclass, field
 import numpy as np
 
 
 @dataclass
-class MotionFilter:
+class PositionFilter:
     state: np.ndarray
-    covariance: np.ndarray = field(default_factory=lambda: np.diag([0.4, 0.4, 1.0, 1.0]))
+    covariance: np.ndarray = field(default_factory=lambda: np.eye(2)*0.4)
     stamp_s: float = 0.0
 
-    def predict(self, stamp_s, acceleration_std=0.4, velocity_decay_s=None):
+    def __post_init__(self):
+        self.state = np.asarray(self.state, dtype=float).reshape(2).copy()
+        self.covariance = np.asarray(self.covariance, dtype=float).reshape(2, 2).copy()
+
+    def predict(self, stamp_s, position_noise_std=0.05):
         dt = float(stamp_s) - self.stamp_s
         if dt < -1e-9:
-            raise ValueError("motion time cannot move backwards")
-        f = np.eye(4)
-        f[0, 2] = f[1, 3] = dt
-        if velocity_decay_s is not None:
-            tau = max(.01, float(velocity_decay_s))
-            decay = np.exp(-dt/tau)
-            f[0, 2] = f[1, 3] = tau*(1-decay)
-            f[2, 2] = f[3, 3] = decay
-        g = np.array([[dt*dt/2, 0], [0, dt*dt/2], [dt, 0], [0, dt]])
-        self.state = f @ self.state
-        self.covariance = f @ self.covariance @ f.T + acceleration_std**2 * (g @ g.T)
+            raise ValueError("observation time cannot move backwards")
+        # A stationary source stays at its estimated position while uncertainty
+        # allows for mapping/registration drift between observations.
+        self.covariance += np.eye(2)*position_noise_std**2*max(0., dt)
         self.stamp_s = float(stamp_s)
 
     def innovation(self, xy, variance):
-        delta = np.asarray(xy, dtype=float) - self.state[:2]
-        s = self.covariance[:2, :2] + np.eye(2)*variance
+        delta = np.asarray(xy, dtype=float) - self.state
+        s = self.covariance + np.eye(2)*variance
         return delta, s, float(delta @ np.linalg.solve(s, delta))
 
     def correct(self, xy, variance):
         delta, s, _ = self.innovation(xy, variance)
-        k = np.linalg.solve(s, self.covariance[:2, :]).T
+        k = np.linalg.solve(s, self.covariance).T
         self.state += k @ delta
-        a = np.eye(4)
-        a[:, :2] -= k
+        a = np.eye(2) - k
         # Joseph form retains PSD under repeated low-noise observations.
         self.covariance = a @ self.covariance @ a.T + variance * (k @ k.T)
         self.covariance = (self.covariance + self.covariance.T) / 2
@@ -45,8 +41,8 @@ def associate(filters, detections, measurement_variance=0.15, gate_chi2=9.21,
               max_distance=3.0, strength=None, allowed=None):
     """One-to-one globally ordered gated association; stable tie breaking.
 
-    Motion prediction provides identity through crossings; appearance cost can
-    distinguish nearby sources. Unassigned detections remain eligible for birth.
+    Position uncertainty and appearance distinguish nearby hotspots.
+    Unassigned detections remain eligible for confirmation.
     """
     pairs = []
     for i, filt in enumerate(filters):
