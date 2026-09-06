@@ -1,0 +1,1165 @@
+我现在在做一个基于宇树 G1 机器人的温度传感与热导航项目，用 Gazebo Classic 11.10.2 和 RViz 做 ROS 2 Humble 仿真。当前仓库已经整理完成并提交过一次，主线只保留 `sim_nav_slam_launch.py`。`README.md`、`AGENTS.md` 和 `PROJECT_ANALYSIS_REPORT.md` 是当前项目说明基准；旧 README、旧 launch、旧 RViz、旧绘图脚本和下面旧 tree 中的生成目录不要作为当前依据。
+
+你的任务是继续推进 SLAM + Nav2 接入后的适配、仿真测试和多轮迭代优化，得到具有强通用性的核心算法。算法必须能应对现实中的不同情况，不能为了当前仿真配置特化。我已经简化机器人模型，用 `g1_nav.urdf` 避免完整人形动力学和关节控制问题，当前重点是运动控制、SLAM/Nav2 闭环和多热源热导航算法验证。后续路线是：先优化感知、场重构、梯度上升、热导航算法和可视化；再在 Gazebo 中加入障碍物和避障模块；之后接入宇树 G1 高层 SDK，替换相关模块并做实机验证。
+
+SLAM + Nav2 已经接入主线 launch。当前重点不是“从零接入”，而是验证和优化完整闭环：
+
+Gazebo -> /scan + /odom -> slam_toolbox -> /map + TF -> Nav2 -> controller_node -> /cmd_vel
+
+同时继续修 Nav2 costmap/map 边界、BT XML 路径、use_sim_time 策略、算法泛化能力和数据分析质量。
+
+我现在运行一次完整 GUI 仿真需要：
+
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true use_gzclient:=true
+
+无界面仿真：
+
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=false use_gzclient:=false
+
+如果 Gazebo 进程残留，不要把 `pkill -9` 当标准流程，优先运行：
+
+bash src/thermal_robot/kill_gz.sh
+
+如果你给了新文件或改了包结构，必要时需要重新构建：
+
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select thermal_interfaces
+source install/setup.bash
+colcon build --packages-select g1_description thermal_sensor_sim signal_preprocessor thermal_field_reconstructor thermal_gradient_processor thermal_motion_controller thermal_bringup
+source install/setup.bash
+
+数据采集不要在仿真刚启动时立刻运行。当前流程是等主线 launch 启动约 20-30 秒，SLAM/Nav2/thermal pipeline 基本就绪后再运行：
+
+python3 src/thermal_robot/scripts/collect_sim_data.py
+
+采集结束时在采集终端 Ctrl+C，之后生成图像：
+
+python3 src/thermal_robot/scripts/plot_all_figures.py
+python3 src/thermal_robot/scripts/plot_slam_nav2.py
+
+
+下面是我在另一个对话里确定的项目路线
+机器人规格确认（从 URDF 解析）
+属性值总 links97总 joints96 (53 revolute)总质量34.758 kg传感器D435 depth cam, MID-360 LiDAR, 2× IMUD435 位置xyz=0.0576 0.0175 0.4299 (torso, pitch≈47.6°)
+
+文献综述要点
+10篇精选文献覆盖：ROS 2 QoS 设计（Macenski 2022, DOI:10.1126/scirobotics.abm6074）、Gazebo gz-sensors 热相机插件（Bingham 2019, DOI:10.23919/OCEANS40490.2019.8962551）、热梯度源定位策略（Wiedemann 2021, DOI:10.1016/j.robot.2020.103687）、自适应 Kalman 滤波（Nakagawa 2020, DOI:10.1109/JSEN.2020.2984234）、人形机器人 ROS2 仿真（Cisneros arXiv:2205.07637）、ros_gz_bridge 桥接规范（github.com/gazebosim/ros_gz）、标量场重构方法比较（Reggente 2009, DOI:10.1109/ICSENS.2009.5398427）、Unitree G1 SDK（github.com/unitreerobotics/unitree_ros2）、梯度跟踪导航策略（Sousa 2006, DOI:10.1109/ROBOT.2006.1642286）、Nav2 /cmd_vel 约定（Macenski 2020, DOI:10.1109/IROS45743.2020.9341207）。
+
+三条路线对比
+Route A（推荐✅）Route BRoute C核心Python 数学热场生成Gazebo Harmonic gz-sensors 插件Gazebo Classic + C++ plugin时间14天21天18天主要风险热场无物理耦合gz/ros 版本冲突 + mimic jointC++ 编译破坏纯 Python 架构测试友好✅ 确定性 pytest❌ 环境依赖复杂❌ C++ 单测较难可扩展性✅ sensor_node 可替换✅ 最真实⚠️ Gazebo Classic EOL
+选定：Route A，理由：目标对齐（算法验证不需要物理耦合）+ 可靠性优先（规避 gz 版本地雷）+ 扩展性保留（sensor_node 接口固定可后期替换）+ 测试友好（确定性单测）+ 节省7天。
+
+
+当前不走 ros2_control + controllers 固定路线。主线是简化 `g1_nav.urdf` + Gazebo 中接受 `/cmd_vel` 的平面移动能力 + `/odom` + `/scan` + SLAM Toolbox + Nav2 + controller_node。完整 G1 URDF 和 meshes 保留为资产，但不是当前主线运行模型。
+
+节点接口约束：topic/service/action/msg 名称、消息类型、发布频率原则上保持稳定。确需改动时，必须说明兼容性理由、影响范围和迁移方案。
+
+
+
+
+当前已完成（你已有 / 我核验过）
+
+thermal_interfaces 接口（msg/srv）定义并通过 ros2 interface show 验证。
+
+g1_description URDF 与 meshes 已整理。当前主线使用 `g1_nav.urdf`，完整 G1 资产保留但不是主线控制模型。
+
+thermal_sensor_sim（sensor_node）已发布 /sim/thermal_raw（64×48 32FC1）并且频率稳定。
+
+signal_preprocessor、thermal_field_reconstructor、thermal_gradient_processor、thermal_motion_controller、colorizer_node 等节点能启动并在 logs 显示运行。
+
+RViz config、world、主线 SLAM launch 文件可运行。当前主线 launch 是 `src/thermal_robot/thermal_bringup/launch/sim_nav_slam_launch.py`。
+
+Service /thermal/get_field_info 能响应（说明 reconstructor 在运行并维护 field 状态）。
+
+Basic /cmd_vel 能让 robot 在 Gazebo 中移动，/odom 和 /scan 能支撑 SLAM/Nav2 主线仿真。
+当前基本完成，但仍需继续修复和优化
+
+Nav2 costmap/map 边界问题、BT XML 绝对路径、use_sim_time 策略、reconstructor shutdown 行为、完整 G1 资产是否继续保留在源码仓库。
+
+
+每轮必须产出“可直接运行”的 artifact（代码/launch/rviz/rosbag/README），并提供运行命令与验证命令。
+
+所有 ROS 逻辑必须以节点形式实现（rclpy 或 C++ 可混用，但本项目以 rclpy 为主），节点间只能通过 ROS topic/service/action 互联，不得函数级耦合。
+
+代码结构、topic 名称、消息格式、参数键必须严格按下面定义（除非在后续轮次给出兼容性技术理由并写明替代方案）。
+
+你必须在每次引用外部资料时给出精确引用（DOI / arXiv / GitHub commit / 官方文档链接）。
+每轮结束处写明：交付清单 + 运行验证命令 + 下轮执行计划（明确、可执行，不要问模糊性问题）。
+强制要求：
+
+每轮交付必须包含明确文件路径、topic/service/消息接口、参数值示例。必须给我完整的可以直接替换的文件，不用一键替换脚本，替换本身我会来做
+
+所有 ROS2 节点必须通过话题或服务通信，不允许函数直接调用。
+所有自定义消息必须通过 thermal_interfaces/ 管理，gradient msg 已迁移至该包。
+
+Topic / Service 规划：
+
+/sim/thermal_raw          sensor_msgs/Image                    10 Hz  (sensor_node.py)
+/sim/thermal_colorized    sensor_msgs/Image                    10 Hz  (colorizer_node.py)
+/thermal/filtered         sensor_msgs/Image                    10 Hz  (preprocessor_node.py)
+/thermal/field            thermal_interfaces/ThermalField      10 Hz  (reconstructor_node.py)
+/thermal/gradient         thermal_interfaces/GradientArray     10 Hz  (gradient_node.py)
+/thermal/get_field_info   thermal_interfaces/srv/GetFieldInfo        (reconstructor_node)
+/odom                     nav_msgs/Odometry                    about 20 Hz
+/scan                     sensor_msgs/LaserScan                10 Hz
+/map                      nav_msgs/OccupancyGrid               from slam_toolbox
+/plan                     nav_msgs/Path                        from Nav2
+/cmd_vel                  geometry_msgs/Twist                  controller/Nav2 output
+/navigate_to_pose         Nav2 NavigateToPose action           controller_node -> Nav2
+
+
+频率与参数示例：
+
+/sim/thermal_raw → 10 Hz
+
+/sim/thermal_colorized → 10 Hz
+
+/thermal/filtered → 10 Hz
+
+/thermal/field → 10 Hz
+
+/thermal/gradient → 10 Hz
+
+/cmd_vel → 10 Hz
+下面是我现在的项目文件架构
+hanchen@hanchen-Legion-R9000P-ADR10:~/ros2_ws$ tree -L 4
+.
+├── AGENTS.md
+├── bags
+│   ├── collected
+│   │   ├── 20260315_135746
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_143536
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_153134
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_155602
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_163419
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_172201
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_180017
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_191214
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_202309
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_211334
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260315_215924
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260316_023919
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260316_030737
+│   │   │   ├── 01_slam_vs_odom.png
+│   │   │   ├── 02_scan_coverage.png
+│   │   │   ├── 03_nav2_plans.png
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── scan_stats.csv
+│   │   │   ├── slam_trajectory.csv
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260316_123630
+│   │   │   ├── 01_slam_vs_odom.png
+│   │   │   ├── 02_scan_coverage.png
+│   │   │   ├── 03_nav2_plans.png
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── scan_stats.csv
+│   │   │   ├── slam_trajectory.csv
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260318_150608
+│   │   │   ├── 01_slam_vs_odom.png
+│   │   │   ├── 02_scan_coverage.png
+│   │   │   ├── 03_nav2_plans.png
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── scan_stats.csv
+│   │   │   ├── slam_trajectory.csv
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   ├── 20260318_202713
+│   │   │   └── snapshots
+│   │   ├── 20260319_131247
+│   │   │   └── snapshots
+│   │   ├── 20260319_131608
+│   │   │   ├── 01_slam_vs_odom.png
+│   │   │   ├── 02_scan_coverage.png
+│   │   │   ├── 03_nav2_plans.png
+│   │   │   ├── 04_slam_quality.png
+│   │   │   ├── 05_slam_nav2_dashboard.png
+│   │   │   ├── cmd_vel.csv
+│   │   │   ├── field_stats.csv
+│   │   │   ├── figures
+│   │   │   ├── gradient_stats.csv
+│   │   │   ├── metadata.json
+│   │   │   ├── scan_stats.csv
+│   │   │   ├── slam_trajectory.csv
+│   │   │   ├── snapshots
+│   │   │   ├── thermal_stats.csv
+│   │   │   └── trajectory.csv
+│   │   └── 20260319_133919
+│   │       ├── 01_slam_vs_odom.png
+│   │       ├── 02_scan_coverage.png
+│   │       ├── 03_nav2_plans.png
+│   │       ├── 04_slam_quality.png
+│   │       ├── 05_slam_nav2_dashboard.png
+│   │       ├── cmd_vel.csv
+│   │       ├── field_stats.csv
+│   │       ├── figures
+│   │       ├── gradient_stats.csv
+│   │       ├── metadata.json
+│   │       ├── nav2_plan_stats.csv
+│   │       ├── scan_stats.csv
+│   │       ├── slam_trajectory.csv
+│   │       ├── snapshots
+│   │       ├── thermal_stats.csv
+│   │       └── trajectory.csv
+│   └── plots
+│       ├── 20260312_124331
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260312_131930
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260312_134126
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260312_194405
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260312_231546
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_002243
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_005531
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_005939
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_010227
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_010609
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_020515
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_025132
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_025922
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_031441
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_032536
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_092518
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_115942
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_191755
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260313_195847
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260314_034426
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── 20260315_153645
+│       │   ├── 01_trajectory.png
+│       │   ├── 02_temperature.png
+│       │   ├── 03_gradient.png
+│       │   ├── 04_convergence.png
+│       │   ├── 05_dashboard.png
+│       │   └── session_report.txt
+│       ├── defense_20260315_030222
+│       │   ├── 01_system_architecture.png
+│       │   ├── 02_world_thermal_field.png
+│       │   ├── 03_sensor_fov_sampling.png
+│       │   ├── 04_filter_comparison.png
+│       │   ├── 05_kalman_convergence.png
+│       │   ├── 06_reconstruction_hotspot.png
+│       │   ├── 07_gradient_comparison.png
+│       │   ├── 08_gradient_angular_error.png
+│       │   ├── 09_gradient_ascent_convergence.png
+│       │   ├── 10_algorithm_benchmark.png
+│       │   ├── 11_belief_map.png
+│       │   ├── 12_state_machine.png
+│       │   ├── 13_full_navigation_simulation.png
+│       │   ├── 14_esc_vs_direct.png
+│       │   ├── 15_performance_dashboard.png
+│       │   ├── B1_pipeline_latency.png
+│       │   ├── B2_unit_test_results.png
+│       │   └── README_defense_plots.txt
+│       └── defense_supplement_20260315_030404
+│           ├── S01_thermal_interfaces.png
+│           ├── S02_parameter_evolution.png
+│           ├── S03_project_gantt.png
+│           ├── S04_source_profiles.png
+│           ├── S05_colorizer_pipeline.png
+│           ├── S06_search_strategies.png
+│           ├── S07_verification_checklist.png
+│           └── S08_scene_overview.png
+├── build
+│   ├── COLCON_IGNORE
+│   ├── g1_description
+│   │   ├── ament_cmake_core
+│   │   │   ├── g1_descriptionConfig.cmake
+│   │   │   ├── g1_descriptionConfig-version.cmake
+│   │   │   ├── package.cmake
+│   │   │   └── stamps
+│   │   ├── ament_cmake_environment_hooks
+│   │   │   ├── ament_prefix_path.dsv
+│   │   │   ├── local_setup.bash
+│   │   │   ├── local_setup.dsv
+│   │   │   ├── local_setup.sh
+│   │   │   ├── local_setup.zsh
+│   │   │   ├── package.dsv
+│   │   │   └── path.dsv
+│   │   ├── ament_cmake_index
+│   │   │   └── share
+│   │   ├── ament_cmake_package_templates
+│   │   │   └── templates.cmake
+│   │   ├── ament_cmake_uninstall_target
+│   │   │   └── ament_cmake_uninstall_target.cmake
+│   │   ├── cmake_args.last
+│   │   ├── CMakeCache.txt
+│   │   ├── CMakeFiles
+│   │   │   ├── 3.22.1
+│   │   │   ├── cmake.check_cache
+│   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   ├── CMakeOutput.log
+│   │   │   ├── CMakeRuleHashes.txt
+│   │   │   ├── CMakeTmp
+│   │   │   ├── g1_description_uninstall.dir
+│   │   │   ├── Makefile2
+│   │   │   ├── Makefile.cmake
+│   │   │   ├── progress.marks
+│   │   │   ├── TargetDirectories.txt
+│   │   │   └── uninstall.dir
+│   │   ├── cmake_install.cmake
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_build.sh
+│   │   ├── colcon_command_prefix_build.sh.env
+│   │   ├── CTestConfiguration.ini
+│   │   ├── CTestCustom.cmake
+│   │   ├── CTestTestfile.cmake
+│   │   ├── install_manifest.txt
+│   │   └── Makefile
+│   ├── signal_preprocessor
+│   │   ├── build
+│   │   │   └── lib
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_setup_py.sh
+│   │   ├── colcon_command_prefix_setup_py.sh.env
+│   │   ├── install.log
+│   │   ├── prefix_override
+│   │   │   ├── __pycache__
+│   │   │   └── sitecustomize.py
+│   │   └── signal_preprocessor.egg-info
+│   │       ├── dependency_links.txt
+│   │       ├── entry_points.txt
+│   │       ├── PKG-INFO
+│   │       ├── requires.txt
+│   │       ├── SOURCES.txt
+│   │       ├── top_level.txt
+│   │       └── zip-safe
+│   ├── thermal_bringup
+│   │   ├── ament_cmake_core
+│   │   │   ├── package.cmake
+│   │   │   ├── stamps
+│   │   │   ├── thermal_bringupConfig.cmake
+│   │   │   └── thermal_bringupConfig-version.cmake
+│   │   ├── ament_cmake_environment_hooks
+│   │   │   ├── ament_prefix_path.dsv
+│   │   │   ├── local_setup.bash
+│   │   │   ├── local_setup.dsv
+│   │   │   ├── local_setup.sh
+│   │   │   ├── local_setup.zsh
+│   │   │   ├── package.dsv
+│   │   │   └── path.dsv
+│   │   ├── ament_cmake_index
+│   │   │   └── share
+│   │   ├── ament_cmake_package_templates
+│   │   │   └── templates.cmake
+│   │   ├── ament_cmake_uninstall_target
+│   │   │   └── ament_cmake_uninstall_target.cmake
+│   │   ├── cmake_args.last
+│   │   ├── CMakeCache.txt
+│   │   ├── CMakeFiles
+│   │   │   ├── 3.22.1
+│   │   │   ├── cmake.check_cache
+│   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   ├── CMakeOutput.log
+│   │   │   ├── CMakeRuleHashes.txt
+│   │   │   ├── CMakeTmp
+│   │   │   ├── Makefile2
+│   │   │   ├── Makefile.cmake
+│   │   │   ├── progress.marks
+│   │   │   ├── TargetDirectories.txt
+│   │   │   ├── thermal_bringup_uninstall.dir
+│   │   │   └── uninstall.dir
+│   │   ├── cmake_install.cmake
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_build.sh
+│   │   ├── colcon_command_prefix_build.sh.env
+│   │   ├── CTestConfiguration.ini
+│   │   ├── CTestCustom.cmake
+│   │   ├── CTestTestfile.cmake
+│   │   ├── install_manifest.txt
+│   │   └── Makefile
+│   ├── thermal_field_reconstructor
+│   │   ├── build
+│   │   │   └── lib
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_setup_py.sh
+│   │   ├── colcon_command_prefix_setup_py.sh.env
+│   │   ├── install.log
+│   │   ├── prefix_override
+│   │   │   ├── __pycache__
+│   │   │   └── sitecustomize.py
+│   │   └── thermal_field_reconstructor.egg-info
+│   │       ├── dependency_links.txt
+│   │       ├── entry_points.txt
+│   │       ├── PKG-INFO
+│   │       ├── requires.txt
+│   │       ├── SOURCES.txt
+│   │       ├── top_level.txt
+│   │       └── zip-safe
+│   ├── thermal_gradient_processor
+│   │   ├── build
+│   │   │   └── lib
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_setup_py.sh
+│   │   ├── colcon_command_prefix_setup_py.sh.env
+│   │   ├── install.log
+│   │   ├── prefix_override
+│   │   │   ├── __pycache__
+│   │   │   └── sitecustomize.py
+│   │   └── thermal_gradient_processor.egg-info
+│   │       ├── dependency_links.txt
+│   │       ├── entry_points.txt
+│   │       ├── PKG-INFO
+│   │       ├── requires.txt
+│   │       ├── SOURCES.txt
+│   │       ├── top_level.txt
+│   │       └── zip-safe
+│   ├── thermal_interfaces
+│   │   ├── ament_cmake_core
+│   │   │   ├── package.cmake
+│   │   │   ├── stamps
+│   │   │   ├── thermal_interfacesConfig.cmake
+│   │   │   └── thermal_interfacesConfig-version.cmake
+│   │   ├── ament_cmake_environment_hooks
+│   │   │   ├── ament_prefix_path.dsv
+│   │   │   ├── library_path.dsv
+│   │   │   ├── local_setup.bash
+│   │   │   ├── local_setup.dsv
+│   │   │   ├── local_setup.sh
+│   │   │   ├── local_setup.zsh
+│   │   │   ├── package.dsv
+│   │   │   ├── path.dsv
+│   │   │   ├── pythonpath.dsv
+│   │   │   └── pythonpath.sh
+│   │   ├── ament_cmake_export_dependencies
+│   │   │   └── ament_cmake_export_dependencies-extras.cmake
+│   │   ├── ament_cmake_export_include_directories
+│   │   │   └── ament_cmake_export_include_directories-extras.cmake
+│   │   ├── ament_cmake_export_libraries
+│   │   │   └── ament_cmake_export_libraries-extras.cmake
+│   │   ├── ament_cmake_export_targets
+│   │   │   └── ament_cmake_export_targets-extras.cmake
+│   │   ├── ament_cmake_index
+│   │   │   └── share
+│   │   ├── ament_cmake_package_templates
+│   │   │   └── templates.cmake
+│   │   ├── ament_cmake_python
+│   │   │   └── thermal_interfaces
+│   │   ├── ament_cmake_uninstall_target
+│   │   │   └── ament_cmake_uninstall_target.cmake
+│   │   ├── cmake_args.last
+│   │   ├── CMakeCache.txt
+│   │   ├── CMakeFiles
+│   │   │   ├── 3.22.1
+│   │   │   ├── ament_cmake_python_build_thermal_interfaces_egg.dir
+│   │   │   ├── ament_cmake_python_copy_thermal_interfaces.dir
+│   │   │   ├── cmake.check_cache
+│   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   ├── CMakeOutput.log
+│   │   │   ├── CMakeRuleHashes.txt
+│   │   │   ├── CMakeTmp
+│   │   │   ├── Export
+│   │   │   ├── Makefile2
+│   │   │   ├── Makefile.cmake
+│   │   │   ├── progress.marks
+│   │   │   ├── TargetDirectories.txt
+│   │   │   ├── thermal_interfaces__cpp.dir
+│   │   │   ├── thermal_interfaces.dir
+│   │   │   ├── thermal_interfaces__rosidl_generator_c.dir
+│   │   │   ├── thermal_interfaces__rosidl_generator_py.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_c.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_cpp.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_c__pyext.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_fastrtps_c.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_fastrtps_cpp.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_fastrtps_c__pyext.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_introspection_c.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_introspection_cpp.dir
+│   │   │   ├── thermal_interfaces__rosidl_typesupport_introspection_c__pyext.dir
+│   │   │   ├── thermal_interfaces_uninstall.dir
+│   │   │   └── uninstall.dir
+│   │   ├── cmake_install.cmake
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_build.sh
+│   │   ├── colcon_command_prefix_build.sh.env
+│   │   ├── CTestConfiguration.ini
+│   │   ├── CTestCustom.cmake
+│   │   ├── CTestTestfile.cmake
+│   │   ├── install_manifest.txt
+│   │   ├── libthermal_interfaces__rosidl_generator_c.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_cpp.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_c.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_fastrtps_cpp.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_fastrtps_c.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_introspection_cpp.so
+│   │   ├── libthermal_interfaces__rosidl_typesupport_introspection_c.so
+│   │   ├── Makefile
+│   │   ├── rosidl_adapter
+│   │   │   ├── thermal_interfaces
+│   │   │   └── thermal_interfaces.idls
+│   │   ├── rosidl_adapter__arguments__thermal_interfaces.json
+│   │   ├── rosidl_cmake
+│   │   │   ├── rosidl_cmake_export_typesupport_libraries-extras.cmake
+│   │   │   ├── rosidl_cmake_export_typesupport_targets-extras.cmake
+│   │   │   ├── rosidl_cmake-extras.cmake
+│   │   │   └── srv
+│   │   ├── rosidl_generator_c
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_generator_c__arguments.json
+│   │   ├── rosidl_generator_cpp
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_generator_cpp__arguments.json
+│   │   ├── rosidl_generator_py
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_generator_py__arguments.json
+│   │   ├── rosidl_typesupport_c
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_c__arguments.json
+│   │   ├── rosidl_typesupport_cpp
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_cpp__arguments.json
+│   │   ├── rosidl_typesupport_fastrtps_c
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_fastrtps_c__arguments.json
+│   │   ├── rosidl_typesupport_fastrtps_cpp
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_fastrtps_cpp__arguments.json
+│   │   ├── rosidl_typesupport_introspection_c
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_introspection_c__arguments.json
+│   │   ├── rosidl_typesupport_introspection_cpp
+│   │   │   └── thermal_interfaces
+│   │   ├── rosidl_typesupport_introspection_cpp__arguments.json
+│   │   └── thermal_interfaces__py
+│   │       ├── CMakeFiles
+│   │       ├── cmake_install.cmake
+│   │       ├── CMakeLists.txt
+│   │       ├── CTestTestfile.cmake
+│   │       └── Makefile
+│   ├── thermal_motion_controller
+│   │   ├── build
+│   │   │   └── lib
+│   │   ├── colcon_build.rc
+│   │   ├── colcon_command_prefix_setup_py.sh
+│   │   ├── colcon_command_prefix_setup_py.sh.env
+│   │   ├── install.log
+│   │   ├── prefix_override
+│   │   │   ├── __pycache__
+│   │   │   └── sitecustomize.py
+│   │   └── thermal_motion_controller.egg-info
+│   │       ├── dependency_links.txt
+│   │       ├── entry_points.txt
+│   │       ├── PKG-INFO
+│   │       ├── requires.txt
+│   │       ├── SOURCES.txt
+│   │       ├── top_level.txt
+│   │       └── zip-safe
+│   └── thermal_sensor_sim
+│       ├── build
+│       │   └── lib
+│       ├── colcon_build.rc
+│       ├── colcon_command_prefix_setup_py.sh
+│       ├── colcon_command_prefix_setup_py.sh.env
+│       ├── install.log
+│       ├── prefix_override
+│       │   ├── __pycache__
+│       │   └── sitecustomize.py
+│       └── thermal_sensor_sim.egg-info
+│           ├── dependency_links.txt
+│           ├── entry_points.txt
+│           ├── PKG-INFO
+│           ├── requires.txt
+│           ├── SOURCES.txt
+│           ├── top_level.txt
+│           └── zip-safe
+├── CLAUDE.md
+├── install
+│   ├── COLCON_IGNORE
+│   ├── g1_description
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── g1_description
+│   ├── local_setup.bash
+│   ├── local_setup.ps1
+│   ├── local_setup.sh
+│   ├── _local_setup_util_ps1.py
+│   ├── _local_setup_util_sh.py
+│   ├── local_setup.zsh
+│   ├── setup.bash
+│   ├── setup.ps1
+│   ├── setup.sh
+│   ├── setup.zsh
+│   ├── signal_preprocessor
+│   │   ├── lib
+│   │   │   ├── python3.10
+│   │   │   └── signal_preprocessor
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── signal_preprocessor
+│   ├── thermal_bringup
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── thermal_bringup
+│   ├── thermal_field_reconstructor
+│   │   ├── lib
+│   │   │   ├── python3.10
+│   │   │   └── thermal_field_reconstructor
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── thermal_field_reconstructor
+│   ├── thermal_gradient_processor
+│   │   ├── lib
+│   │   │   ├── python3.10
+│   │   │   └── thermal_gradient_processor
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── thermal_gradient_processor
+│   ├── thermal_interfaces
+│   │   ├── include
+│   │   │   └── thermal_interfaces
+│   │   ├── lib
+│   │   │   ├── libthermal_interfaces__rosidl_generator_c.so
+│   │   │   ├── libthermal_interfaces__rosidl_generator_py.so
+│   │   │   ├── libthermal_interfaces__rosidl_typesupport_cpp.so
+│   │   │   ├── libthermal_interfaces__rosidl_typesupport_c.so
+│   │   │   ├── libthermal_interfaces__rosidl_typesupport_fastrtps_cpp.so
+│   │   │   ├── libthermal_interfaces__rosidl_typesupport_fastrtps_c.so
+│   │   │   ├── libthermal_interfaces__rosidl_typesupport_introspection_cpp.so
+│   │   │   └── libthermal_interfaces__rosidl_typesupport_introspection_c.so
+│   │   ├── local
+│   │   │   └── lib
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── thermal_interfaces
+│   ├── thermal_motion_controller
+│   │   ├── lib
+│   │   │   ├── python3.10
+│   │   │   └── thermal_motion_controller
+│   │   └── share
+│   │       ├── ament_index
+│   │       ├── colcon-core
+│   │       └── thermal_motion_controller
+│   └── thermal_sensor_sim
+│       ├── lib
+│       │   ├── python3.10
+│       │   └── thermal_sensor_sim
+│       └── share
+│           ├── ament_index
+│           ├── colcon-core
+│           └── thermal_sensor_sim
+├── log
+│   ├── build_2026-04-27_19-01-33
+│   │   ├── events.log
+│   │   ├── logger_all.log
+│   │   └── thermal_interfaces
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-01-37
+│   │   ├── events.log
+│   │   ├── g1_description
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── logger_all.log
+│   │   ├── signal_preprocessor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_bringup
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_field_reconstructor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_gradient_processor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_motion_controller
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   └── thermal_sensor_sim
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-34-37
+│   │   ├── events.log
+│   │   ├── logger_all.log
+│   │   └── thermal_bringup
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-40-09
+│   │   ├── events.log
+│   │   ├── logger_all.log
+│   │   └── thermal_interfaces
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-40-10
+│   │   ├── events.log
+│   │   ├── g1_description
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── logger_all.log
+│   │   ├── signal_preprocessor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_bringup
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_field_reconstructor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_gradient_processor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_motion_controller
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   └── thermal_sensor_sim
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-43-01
+│   │   ├── events.log
+│   │   ├── logger_all.log
+│   │   └── thermal_interfaces
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── build_2026-04-27_19-43-02
+│   │   ├── events.log
+│   │   ├── g1_description
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── logger_all.log
+│   │   ├── signal_preprocessor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_bringup
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_field_reconstructor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_gradient_processor
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   ├── thermal_motion_controller
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   └── thermal_sensor_sim
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── COLCON_IGNORE
+│   ├── latest -> latest_list
+│   ├── latest_build -> build_2026-04-27_19-43-02
+│   ├── latest_list -> list_2026-04-27_19-55-05
+│   ├── launch_verify
+│   │   ├── 2026-04-27-19-16-34-788855-hanchen-Legion-R9000P-ADR10-2
+│   │   │   └── launch.log
+│   │   ├── async_slam_toolbox_node_323_1777288603883.log
+│   │   ├── behavior_server_351_1777288606880.log
+│   │   ├── bt_navigator_353_1777288606881.log
+│   │   ├── controller_server_345_1777288606879.log
+│   │   ├── gzserver_19_1777288595165.log
+│   │   ├── lifecycle_manager_359_1777288606878.log
+│   │   ├── planner_server_349_1777288606878.log
+│   │   ├── python3_255_1777288601238.log
+│   │   ├── python3_457_1777288613127.log
+│   │   ├── python3_459_1777288613122.log
+│   │   ├── python3_461_1777288613124.log
+│   │   ├── python3_463_1777288613094.log
+│   │   ├── python3_465_1777288613281.log
+│   │   ├── python3_672_1777288615107.log
+│   │   ├── robot_state_publisher_21_1777288594870.log
+│   │   ├── smoother_server_347_1777288606879.log
+│   │   ├── velocity_smoother_357_1777288606878.log
+│   │   └── waypoint_follower_355_1777288606878.log
+│   ├── launch_verify_cli
+│   │   ├── 2026-04-27-19-43-13-411876-hanchen-Legion-R9000P-ADR10-2
+│   │   │   └── launch.log
+│   │   ├── 2026-04-27-19-55-06-134689-hanchen-Legion-R9000P-ADR10-2
+│   │   │   └── launch.log
+│   │   ├── python3_19_1777288640313.log
+│   │   ├── python3_19_1777288640336.log
+│   │   ├── python3_19_1777288664134.log
+│   │   ├── python3_19_1777288664944.log
+│   │   ├── python3_19_1777288664945.log
+│   │   ├── python3_2_1777288640136.log
+│   │   ├── python3_2_1777288640904.log
+│   │   ├── python3_50_1777288640502.log
+│   │   ├── python3_50_1777288641083.log
+│   │   └── python3_51_1777288664361.log
+│   ├── list_2026-04-27_19-40-04
+│   │   └── logger_all.log
+│   ├── list_2026-04-27_19-42-16
+│   │   └── logger_all.log
+│   ├── list_2026-04-27_19-42-32
+│   │   └── logger_all.log
+│   ├── list_2026-04-27_19-42-56
+│   │   └── logger_all.log
+│   └── list_2026-04-27_19-55-05
+│       └── logger_all.log
+├── PROJECT_ANALYSIS_REPORT.md
+└── src
+    └── thermal_robot
+        ├── g1_description
+        │   ├── CMakeLists.txt
+        │   ├── meshes
+        │   ├── package.xml
+        │   └── urdf
+        ├── kill_gz.sh
+        ├── README.md
+        ├── scripts
+        │   ├── collect_sim_data.py
+        │   ├── plot_all_figures.py
+        │   ├── plot_slam_nav2.py
+        │   └── send_cmd_vel.sh
+        ├── signal_preprocessor
+        │   ├── package.xml
+        │   ├── resource
+        │   ├── setup.cfg
+        │   ├── setup.py
+        │   └── signal_preprocessor
+        ├── tests
+        │   ├── __pycache__
+        │   └── test_thermal_system.py
+        ├── thermal_bringup
+        │   ├── CMakeLists.txt
+        │   ├── config
+        │   ├── launch
+        │   ├── package.xml
+        │   ├── rviz
+        │   └── worlds
+        ├── thermal_field_reconstructor
+        │   ├── package.xml
+        │   ├── resource
+        │   ├── setup.cfg
+        │   ├── setup.py
+        │   └── thermal_field_reconstructor
+        ├── thermal_gradient_processor
+        │   ├── package.xml
+        │   ├── resource
+        │   ├── setup.cfg
+        │   ├── setup.py
+        │   └── thermal_gradient_processor
+        ├── thermal_interfaces
+        │   ├── CMakeLists.txt
+        │   ├── msg
+        │   ├── package.xml
+        │   └── srv
+        ├── thermal_motion_controller
+        │   ├── package.xml
+        │   ├── resource
+        │   ├── setup.cfg
+        │   ├── setup.py
+        │   └── thermal_motion_controller
+        └── thermal_sensor_sim
+            ├── package.xml
+            ├── resource
+            ├── setup.cfg
+            ├── setup.py
+            └── thermal_sensor_sim
+

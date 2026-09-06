@@ -600,15 +600,44 @@ controller_node v31
 SLAM Toolbox + Nav2 + direct /cmd_vel fallback
 ```
 
-## 16. 快速接手命令
+## 16. 仿真全流程命令汇总
 
-构建：
+这一节按一次完整实验的实际操作顺序整理。后续接手时，优先按这里执行；不要再找旧的 `sim_nav_launch.py`、`thermal_nav.rviz`、`plot_metrics.py` 或 `run_tests.sh`。
+
+### 16.1 所有终端的通用环境
+
+每开一个新终端都先进入工作区并加载环境：
 
 ```bash
 cd /home/hanchen/ros2_ws
 source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+如果 `install/setup.bash` 不存在，说明还没有构建，先执行 16.2。
+
+### 16.2 首次接手或代码变化后的构建
+
+先检查系统依赖：
+
+```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+rosdep check --from-paths src/thermal_robot --ignore-src
+```
+
+如果依赖缺失，用 rosdep 安装缺失包：
+
+```bash
+rosdep install --from-paths src/thermal_robot --ignore-src -r -y
+```
+
+构建顺序建议先构建接口包，再构建其余包：
+
+```bash
 colcon build --packages-select thermal_interfaces
 source install/setup.bash
+
 colcon build --packages-select \
   g1_description \
   thermal_sensor_sim \
@@ -617,46 +646,425 @@ colcon build --packages-select \
   thermal_gradient_processor \
   thermal_motion_controller \
   thermal_bringup
+
 source install/setup.bash
 ```
 
-检查依赖：
+确认 ROS 2 能找到 8 个包：
 
 ```bash
-rosdep check --from-paths src/thermal_robot --ignore-src
+colcon list
 ```
 
-启动主线：
+当前应包含：
+
+```text
+g1_description
+signal_preprocessor
+thermal_bringup
+thermal_field_reconstructor
+thermal_gradient_processor
+thermal_interfaces
+thermal_motion_controller
+thermal_sensor_sim
+```
+
+### 16.3 启动仿真前检查
+
+查看主线 launch 参数：
 
 ```bash
-ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true
+ros2 launch thermal_bringup sim_nav_slam_launch.py --show-args
 ```
 
-无界面启动：
+当前有效参数：
+
+```text
+use_rviz       default true
+use_gzclient   default true
+use_sim_time   default false
+```
+
+运行纯算法测试，确认 Python 侧基础逻辑没有坏：
+
+```bash
+python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -q
+```
+
+如果 ROS 日志目录权限异常，可以给本次启动指定临时日志目录：
+
+```bash
+mkdir -p /tmp/ros2_ws_logs
+ROS_LOG_DIR=/tmp/ros2_ws_logs ros2 launch thermal_bringup sim_nav_slam_launch.py --show-args
+```
+
+### 16.4 启动完整 GUI 仿真
+
+Terminal 1：
+
+```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true use_gzclient:=true
+```
+
+等效简写：
+
+```bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py
+```
+
+预期启动节奏：
+
+```text
+t=0s   gzserver + robot_state_publisher
+t=5s   Gazebo 图形客户端 gzclient
+t=6s   spawn g1_nav_robot，初始位姿 x=-6, y=0
+t=9s   slam_toolbox
+t=12s  Nav2 planner/controller/bt/lifecycle
+t=18s  thermal pipeline + controller_node
+t=20s  colorizer_node + RViz
+```
+
+所以 RViz 不是立刻出现，要等约 20 秒；如果启动时写了 `use_rviz:=false`，就不会有 RViz 界面。
+
+### 16.5 不同启动模式
+
+只开 RViz，不开 Gazebo 图形客户端：
+
+```bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true use_gzclient:=false
+```
+
+完全无界面启动，适合远程、测试或采集：
 
 ```bash
 ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=false use_gzclient:=false
 ```
 
-清理残留 Gazebo：
+不要随意改 `use_sim_time`。当前主线默认是 `false`，报告中的验证也是基于这个默认值；改成 `true` 前需要同时验证 Gazebo `/clock`、TF、SLAM、Nav2 lifecycle 和 controller 的时间行为。
+
+### 16.6 启动后基础检查
+
+Terminal 2：
+
+```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+查看节点、话题、服务、action 是否存在：
+
+```bash
+ros2 node list
+ros2 topic list
+ros2 service list
+ros2 action list
+```
+
+关键节点应包含：
+
+```text
+/robot_state_publisher
+/slam_toolbox
+/planner_server
+/controller_server
+/bt_navigator
+/lifecycle_manager_nav
+/sensor_node
+/preprocessor_node
+/reconstructor_node
+/gradient_node
+/controller_node
+/colorizer_node
+/rviz2                  # use_rviz:=true 时才有
+```
+
+关键 action：
+
+```bash
+ros2 action info /navigate_to_pose
+```
+
+Nav2 lifecycle 状态检查：
+
+```bash
+ros2 lifecycle get /planner_server
+ros2 lifecycle get /controller_server
+ros2 lifecycle get /bt_navigator
+```
+
+正常应为 `active`。如果不是 active，先看 Terminal 1 的 Nav2 lifecycle 日志。
+
+### 16.7 话题频率检查
+
+每条 `ros2 topic hz` 建议观察 5-10 秒后 Ctrl+C：
+
+```bash
+ros2 topic hz /sim/thermal_raw
+ros2 topic hz /sim/thermal_colorized
+ros2 topic hz /thermal/filtered
+ros2 topic hz /thermal/field
+ros2 topic hz /thermal/gradient
+ros2 topic hz /odom
+ros2 topic hz /scan
+ros2 topic hz /cmd_vel
+```
+
+当前期望稳态频率：
+
+```text
+/sim/thermal_raw        10 Hz
+/sim/thermal_colorized  10 Hz
+/thermal/filtered       10 Hz
+/thermal/field          10 Hz
+/thermal/gradient       10 Hz
+/odom                   about 20 Hz
+/scan                   10 Hz
+/cmd_vel                about 10 Hz when controller/Nav2 is commanding
+```
+
+查看一次热梯度消息：
+
+```bash
+ros2 topic echo /thermal/gradient --once
+```
+
+查询当前热场统计：
+
+```bash
+ros2 service call /thermal/get_field_info \
+  thermal_interfaces/srv/GetFieldInfo "{include_full_data: false}"
+```
+
+### 16.8 TF、SLAM、地图检查
+
+检查 odom 到 base_link：
+
+```bash
+ros2 run tf2_ros tf2_echo odom base_link
+```
+
+检查 SLAM 发布的 map 到 base_link：
+
+```bash
+ros2 run tf2_ros tf2_echo map base_link
+```
+
+检查地图是否发布：
+
+```bash
+ros2 topic echo /map --once
+```
+
+检查激光雷达：
+
+```bash
+ros2 topic echo /scan --once
+```
+
+如果 `/scan` 有数据但 `/map` 或 `map->base_link` 长时间没有，重点看 `slam_toolbox` 日志和 TF。
+
+### 16.9 RViz 界面检查
+
+RViz 使用：
+
+```text
+src/thermal_robot/thermal_bringup/rviz/thermal_nav_slam.rviz
+```
+
+RViz 中重点看：
+
+```text
+TF tree
+LaserScan /scan
+Map /map
+RobotModel
+Path /plan
+Thermal raw/colorized image: /sim/thermal_colorized
+Thermal field/gradient related displays
+```
+
+如果没有 RViz 窗口：
+
+```bash
+echo $DISPLAY
+ros2 node list
+```
+
+判断顺序：
+
+```text
+1. 确认启动命令不是 use_rviz:=false
+2. 等待至少 20 秒
+3. 确认 /rviz2 是否出现在 ros2 node list
+4. 确认当前环境有图形显示能力，尤其是 SSH/容器环境的 DISPLAY
+5. 需要只有 RViz 时，用 use_rviz:=true use_gzclient:=false
+```
+
+### 16.10 数据采集
+
+Terminal 3，等主线启动约 20-30 秒后开始采集：
+
+```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+python3 src/thermal_robot/scripts/collect_sim_data.py
+```
+
+采集时保持 Terminal 1 的仿真继续运行。需要结束采集时，在 Terminal 3 按 Ctrl+C；脚本会保存 CSV、metadata 和 snapshots。
+
+输出位置：
+
+```text
+bags/collected/<YYYYMMDD_HHMMSS>/
+```
+
+查看已有采集目录：
+
+```bash
+ls -td bags/collected/*
+```
+
+### 16.11 生成实验图表
+
+指定采集目录生成完整热导航图：
+
+```bash
+python3 src/thermal_robot/scripts/plot_all_figures.py bags/collected/<YYYYMMDD_HHMMSS>
+```
+
+指定采集目录生成 SLAM/Nav2 图：
+
+```bash
+python3 src/thermal_robot/scripts/plot_slam_nav2.py bags/collected/<YYYYMMDD_HHMMSS>
+```
+
+也可以自动使用最新采集目录：
+
+```bash
+python3 src/thermal_robot/scripts/plot_all_figures.py
+python3 src/thermal_robot/scripts/plot_slam_nav2.py
+```
+
+主要输出：
+
+```text
+bags/collected/<timestamp>/figures/
+```
+
+### 16.12 测试和基准
+
+纯算法测试：
+
+```bash
+python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -q
+```
+
+详细输出：
+
+```bash
+python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -v
+```
+
+算法基准：
+
+```bash
+python3 src/thermal_robot/tests/test_thermal_system.py --bench
+```
+
+ROS 集成测试需要先启动主线 launch：
+
+```bash
+python3 src/thermal_robot/tests/test_thermal_system.py --ros
+```
+
+### 16.13 手动运动诊断
+
+只用于诊断 `/cmd_vel -> /odom/Gazebo` 链路，不作为正常实验控制方式。因为主线 controller/Nav2 也会发布 `/cmd_vel`，手动测试可能和自动控制抢速度指令。
+
+```bash
+bash src/thermal_robot/scripts/send_cmd_vel.sh
+bash src/thermal_robot/scripts/send_cmd_vel.sh 0.2 0.3
+```
+
+也可直接发一次 Twist：
+
+```bash
+ros2 topic pub --times 10 /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+```
+
+### 16.14 停止仿真和清理残留进程
+
+正常停止：
+
+```text
+在 Terminal 1 按 Ctrl+C
+```
+
+如果 Gazebo 进程残留：
 
 ```bash
 bash src/thermal_robot/kill_gz.sh
 ```
 
-测试：
+查看是否仍有 Gazebo 进程：
+
+```bash
+pgrep -a gzserver
+pgrep -a gzclient
+```
+
+没有输出表示 Gazebo 已清理干净。
+
+### 16.15 一次完整实验的最短命令顺序
+
+Terminal 1，启动仿真：
 
 ```bash
 cd /home/hanchen/ros2_ws
-python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -q
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true use_gzclient:=true
 ```
 
-采集与绘图：
+Terminal 2，启动后检查：
 
 ```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 node list
+ros2 action info /navigate_to_pose
+ros2 topic hz /thermal/gradient
+ros2 service call /thermal/get_field_info \
+  thermal_interfaces/srv/GetFieldInfo "{include_full_data: false}"
+```
+
+Terminal 3，采集和绘图：
+
+```bash
+cd /home/hanchen/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 python3 src/thermal_robot/scripts/collect_sim_data.py
-python3 src/thermal_robot/scripts/plot_all_figures.py bags/collected/<timestamp>
-python3 src/thermal_robot/scripts/plot_slam_nav2.py bags/collected/<timestamp>
+```
+
+采集结束 Ctrl+C 后：
+
+```bash
+python3 src/thermal_robot/scripts/plot_all_figures.py
+python3 src/thermal_robot/scripts/plot_slam_nav2.py
+```
+
+结束仿真：
+
+```bash
+bash src/thermal_robot/kill_gz.sh
 ```
 
 ## 17. 文件索引
