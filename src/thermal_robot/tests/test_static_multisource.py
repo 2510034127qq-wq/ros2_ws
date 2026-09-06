@@ -114,13 +114,12 @@ def test_legacy_policy_leaves_peak_without_declaring_search_complete(immediate, 
 
 
 
-def test_belief_count_occlusion_false_positive_pruning_and_information():
+def test_belief_count_occlusion_false_positive_pruning():
     b=SourceBelief(BeliefParams(budget_ms=1000,confidence_memory_s=1000))
     for t in range(6):
         assert b.update([det(0),det(4)],float(t),lambda x,y:1.)
     pmf=b.cardinality()
     assert np.argmax(pmf)==2 and pmf[2]>.95 and sum(pmf)==pytest.approx(1)
-    assert b.information_gain([[0,0],[100,100]])[0]>b.information_gain([[0,0],[100,100]])[1]
     p=b.clusters[0].probability
     b.update([],6.,lambda x,y:0.)
     assert b.clusters[0].probability>.99*p

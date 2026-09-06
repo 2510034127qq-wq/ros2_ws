@@ -10,14 +10,11 @@ import numpy as np
 from thermal_field_reconstructor import visibility as _visibility
 from thermal_field_reconstructor.grid_geometry import (
     GRID_CENTER_X, GRID_CENTER_Y, GRID_SIZE_M)
-from thermal_field_reconstructor.observation import (  # noqa: F401
-    SensorPose2D, ThermalObservation, TopDownRectProjector,
-    project_pixels_to_world)
+from thermal_field_reconstructor.observation import SensorPose2D, TopDownRectProjector
 
 VIEW_NEVER = 0
 VIEW_BLOCKED_ONLY = 1
 VIEW_CLEAR = 2
-N_VIEW_SECTORS = 8
 
 
 @dataclass
@@ -33,8 +30,6 @@ class GridSnapshot:
     visit_count: np.ndarray
     last_seen_age_s: np.ndarray
     view_state: np.ndarray
-    view_sectors: np.ndarray
-    last_view_distance_m: np.ndarray
 
 
 class WorldThermalGrid:
@@ -52,7 +47,6 @@ class WorldThermalGrid:
         age_decay_s: float = 45.0,
         unknown_variance: float = 100.0,
         fusion_memory_s: float = float("inf"),
-        sector_memory_s: float = float("inf"),
     ):
         self.resolution = float(resolution)
         self.width = int(round(size_x_m / self.resolution))
@@ -64,17 +58,12 @@ class WorldThermalGrid:
         self._m2 = np.zeros(shape, dtype=np.float32)
         self.visit_count = np.zeros(shape, dtype=np.uint32)
         self.last_seen = np.full(shape, -1.0, dtype=np.float32)
-        self.ambient_temp = float(ambient_temp)
         self.confidence_visit_scale = max(1.0, float(confidence_visit_scale))
         self.age_decay_s = max(1e-3, float(age_decay_s))
         self.unknown_variance = float(unknown_variance)
         self.fusion_memory_s = float(fusion_memory_s)
-        self.sector_memory_s = float(sector_memory_s)
-        self.last_view_distance_m = np.full(shape,np.nan,dtype=np.float32)
         self._effective_count = np.zeros(shape, dtype=np.float32)
-        self.sector_last_seen = np.full((*shape, N_VIEW_SECTORS), -1., dtype=np.float32)
         self.blocked_count = np.zeros(shape, dtype=np.uint32)
-        self.view_sectors = np.zeros(shape, dtype=np.uint8)
 
     def world_to_cell(self, wx: np.ndarray, wy: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         ix = np.floor((wx - self.origin_x) / self.resolution).astype(np.int32)
@@ -150,16 +139,6 @@ class WorldThermalGrid:
         self._effective_count.reshape(-1)[clear]=new_n
         visit_flat[clear] = np.clip(visit_flat[clear].astype(float)+raw_count[clear], 0, np.iinfo(np.uint32).max).astype(np.uint32)
         last_flat[clear] = float(obs.stamp_s)
-        self.last_view_distance_m.reshape(-1)[clear] = np.hypot(
-            cwx[visible]-obs.sensor_pose.x,cwy[visible]-obs.sensor_pose.y)
-
-        sector_flat = self.view_sectors.reshape(-1)
-        az = np.arctan2(obs.sensor_pose.y - cwy[visible],
-                        obs.sensor_pose.x - cwx[visible])
-        sector = (((az + np.pi) / (2.0 * np.pi)) * N_VIEW_SECTORS).astype(np.int32)
-        sector = np.clip(sector, 0, N_VIEW_SECTORS - 1)
-        sector_flat[clear] |= (1 << sector).astype(np.uint8)
-        self.sector_last_seen.reshape(-1,N_VIEW_SECTORS)[clear,sector] = float(obs.stamp_s)
 
     def integrate_image(
         self,
@@ -193,10 +172,6 @@ class WorldThermalGrid:
         view_state = np.zeros_like(self.mean, dtype=np.uint8)
         view_state[self.blocked_count > 0] = VIEW_BLOCKED_ONLY
         view_state[self.visit_count > 0] = VIEW_CLEAR
-        sectors=self.view_sectors.copy()
-        if np.isfinite(self.sector_memory_s):
-            recent=(self.sector_last_seen>=0)&((float(now_s)-self.sector_last_seen)<=self.sector_memory_s)
-            sectors=np.sum(recent*(1<<np.arange(N_VIEW_SECTORS)),axis=-1).astype(np.uint8)
         return GridSnapshot(
             width=self.width,
             height=self.height,
@@ -209,6 +184,4 @@ class WorldThermalGrid:
             visit_count=self.visit_count.copy(),
             last_seen_age_s=age,
             view_state=view_state,
-            view_sectors=sectors,
-            last_view_distance_m=self.last_view_distance_m.copy(),
         )

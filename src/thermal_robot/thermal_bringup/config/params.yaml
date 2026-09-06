@@ -7,7 +7,6 @@
 #
 # 核心修复：
 #   post_confirm_rounds=10：确认源后10轮frontier强制min_d=7m, dist_sigma=15m
-#   levy_post_confirm_step=10：确认后立即向已知源质心反方向跳跃10m
 # =============================================================================
 
 sensor_node:
@@ -103,8 +102,6 @@ controller_node:
     min_ascent_temp_rise:    0.5
     peak_window_s:           4.0
     peak_temp_delta:         15.0
-    plateau_thresh:          2.0
-    peak_confirm_s:          2.0
     rearm_cool_delta:        6.0
     known_source_radius:         2.0
     source_repulsion_k:          0.8
@@ -144,12 +141,10 @@ controller_node:
     post_confirm_rounds:       10     # 确认源后强制远场探索的轮数
     post_confirm_min_d:         5.0   # boost期间frontier最小距离
     post_confirm_dist_sigma:   15.0   # boost期间距离衰减sigma
-    levy_post_confirm_step:    10.0   # 确认后定向Lévy步长
     post_confirm_departure_dist: 9.0
 
     # ── CONVERGE ─────────────────────────────────────────────────────────────
     pre_peak_thresh_ratio:    0.25
-    converge_circle_radius:   1.5
     converge_lin_vel:         0.10
     converge_max_s:           90.0
     converge_to_sample_ratio:  0.65

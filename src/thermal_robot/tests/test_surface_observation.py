@@ -110,11 +110,11 @@ def test_rotated_occupancy_preserves_obstacle_and_motion_queries():
     assert v.line_reachable_known_free(rotated,9.5,20.5,9.5,23.5)
 
 
-def test_fractional_confidence_weights_mean_and_expires_sector_history():
+def test_fractional_confidence_weights_mean_and_preserves_observation_age():
     from thermal_field_reconstructor.thermal_mapping import WorldThermalGrid
     from thermal_field_reconstructor.observation import ThermalObservation,SensorPose2D
     g=WorldThermalGrid(center_x=0,center_y=0,size_x_m=4,size_y_m=4,
-                       resolution=1,sector_memory_s=5.)
+                       resolution=1)
     def observe(t,temp,weight):
         g.integrate_observation(ThermalObservation(t,SensorPose2D(-1.5,.5,0),
             'surface_radiance',np.array([.5]),np.array([.5]),np.array([temp]),np.array([weight])))
@@ -124,6 +124,4 @@ def test_fractional_confidence_weights_mean_and_expires_sector_history():
     snap=g.snapshot(1.)
     assert snap.temperature_mean[2,2]==pytest.approx(30.)
     assert snap.confidence[2,2]==pytest.approx(.4/6)
-    assert snap.last_view_distance_m[2,2]==pytest.approx(2.)
-    assert snap.view_sectors[2,2]>0
-    assert g.snapshot(7.).view_sectors[2,2]==0
+    assert g.snapshot(7.).last_seen_age_s[2,2]==pytest.approx(6.)

@@ -68,7 +68,7 @@ class TestObservationContract:
     def test_contract_fields_and_legacy_reexport(self):
         from thermal_field_reconstructor.observation import (
             MEASUREMENT_FIELD_DIRECT, SensorPose2D, TopDownRectProjector)
-        from thermal_field_reconstructor.thermal_mapping import project_pixels_to_world
+        from thermal_field_reconstructor.observation import project_pixels_to_world
 
         img = np.full((48, 64), 25.0, dtype=np.float32)
         obs = TopDownRectProjector(fov_x=4.0, fov_y=3.0).project(
@@ -230,10 +230,10 @@ class TestThreeStateFusion:
         np.testing.assert_allclose(a.mean, b.mean, rtol=1e-6)
         np.testing.assert_array_equal(a.visit_count, b.visit_count)
 
-    def test_view_state_transitions_and_sectors(self):
+    def test_view_state_transitions(self):
         from thermal_field_reconstructor import visibility
         from thermal_field_reconstructor.thermal_mapping import (
-            N_VIEW_SECTORS, VIEW_BLOCKED_ONLY, VIEW_CLEAR, VIEW_NEVER)
+            VIEW_BLOCKED_ONLY, VIEW_CLEAR, VIEW_NEVER)
         g = self._grid()
         occ = visibility.OccupancyView(-10.0, -10.0, 0.25,
                                        np.zeros((80, 80), dtype=np.int16))
@@ -251,14 +251,6 @@ class TestThreeStateFusion:
         occ.data[:, 44] = 0
         g.integrate_observation(self._obs(30.0, 0.0, 0.0, 0.0), occupancy=occ)
         assert g.snapshot(now_s=3.0).view_state[iy_mid, ix_blocked] == VIEW_CLEAR
-        assert N_VIEW_SECTORS == 8
-        g2 = self._grid()
-        g2.integrate_observation(self._obs(25.0, 1.5, 0.0, 0.0))
-        east_bits = int(g2.view_sectors[iy_mid, ix_clear])
-        g2.integrate_observation(self._obs(25.0, -1.5, 0.0, 0.0))
-        both_bits = int(g2.view_sectors[iy_mid, ix_clear])
-        assert east_bits != 0
-        assert bin(both_bits).count("1") > bin(east_bits).count("1")
 
 
 class TestResidual:

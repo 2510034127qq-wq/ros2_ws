@@ -96,6 +96,10 @@ python3 src/thermal_robot/scripts/plot_software_validation.py \
 
 `SourceEstimate` 保留位置、协方差、强度、确认状态和 `age_s`，删除速度、速度方差、重捕获计数与间隔。重新构建接口包和所有依赖；外部消费者需要更新，旧派生消息 bag 不保证兼容。优先回放原始热图、深度和 TF。
 
+`ThermalMap` 进一步删除无人消费的 `view_sectors`、`last_view_distance_m`；保留 `view_state` 和观测年龄，继续区分未观察、被遮挡、已观察。对应的方向历史缓存和 `sector_memory_s` 配置已删除；外部消息消费者同样需要重新构建。mapper 的 `occupied_threshold` 现在实际传入可见性判断，默认仍为 65。
+
+无效控制参数 `plateau_thresh`、`peak_confirm_s`、`peak_confirm_lin_vel`、`converge_circle_radius`、`levy_post_confirm_step` 已删除。B 级慢层直接使用表面候选，不再计算随后被丢弃的高斯预测场；A 级仍保留残差候选计算。信息收益仅保留控制器调用的共享实现。详见 [冗余清理记录](../devlog/2026-09-06-redundancy-cleanup.md)。
+
 静态对照可固定场景、seed 和预算，比较 fast/dual 或 online/shadow/off；也可通过 `software_params` 改 `residual_enabled` 或 mapper 的 `visibility_enabled`。B 级物理遮挡不因关闭算法可见性而消失。`posterior_*` 假设应与 `belief_node` 参数保持一致。
 
 当前精简与实测证据见 [精简验证记录](../devlog/2026-09-06-static-inspection-simplification.md)。[旧软件交付审计](software_completion_audit.md) 仅对应精简前版本。

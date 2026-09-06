@@ -45,7 +45,7 @@ class ThermalMapperNode(Node):
                               ('camera_offset_x_m',0.),('camera_offset_y_m',0.),
                               ('camera_hfov_deg',57.),('depth_sync_tolerance_s',.06),
                               ('projection_near_m',.15),('projection_far_m',15.),
-                              ('sector_memory_s',60.),('fusion_memory_s',1.e9),('pose_from_tf',False)]:
+                              ('fusion_memory_s',1.e9),('pose_from_tf',False)]:
             self.declare_parameter(name,default)
         self._sensor_model=str(self.get_parameter('sensor_model').value)
         self._camera_info=None
@@ -77,7 +77,6 @@ class ThermalMapperNode(Node):
             age_decay_s=float(g('age_decay_s').value),
             unknown_variance=float(g('unknown_variance').value),
             fusion_memory_s=float(g('fusion_memory_s').value),
-            sector_memory_s=float(g('sector_memory_s').value),
         )
 
         self._odom_x = 0.0
@@ -87,7 +86,6 @@ class ThermalMapperNode(Node):
         self._wy = self._spawn_y
         self._tf_ready = False
         self._last_pub_s = 0.0
-        self._t0 = time.monotonic()
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -146,7 +144,7 @@ class ThermalMapperNode(Node):
         origin_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
         view=visibility.from_flat(msg.data,msg.info.width,msg.info.height,
             msg.info.origin.position.x,msg.info.origin.position.y,msg.info.resolution,
-            origin_yaw=origin_yaw)
+            origin_yaw=origin_yaw, occupied_threshold=self._occupied_threshold)
         if self._pose_source=='odom':
             try:
                 tf=self._tf_buffer.lookup_transform('odom',msg.header.frame_id,rclpy.time.Time(),
@@ -285,7 +283,6 @@ class ThermalMapperNode(Node):
         msg.header = header
         msg.header.frame_id = self._frame_id
         msg.measurement_type = 'field_direct' if self._sensor_model=='a' else 'surface_radiance'
-        msg.last_view_distance_m=snap.last_view_distance_m.reshape(-1).tolist()
         msg.width = snap.width
         msg.height = snap.height
         msg.resolution = float(snap.resolution)
@@ -297,7 +294,6 @@ class ThermalMapperNode(Node):
         msg.visit_count = snap.visit_count.reshape(-1).astype(np.uint32).tolist()
         msg.last_seen_age_s = snap.last_seen_age_s.reshape(-1).astype(np.float32).tolist()
         msg.view_state = snap.view_state.reshape(-1).astype(np.uint8).tolist()
-        msg.view_sectors = snap.view_sectors.reshape(-1).astype(np.uint8).tolist()
         self._pub.publish(msg)
 
 

@@ -58,16 +58,14 @@ class BeliefNode(Node):
             kwargs=(msg.resolution,msg.origin_x,msg.origin_y,age)
             self.extractor.measurement_type=msg.measurement_type or "field_direct"
             detections=self.extractor.extract_detections(temp,conf,*kwargs)
-            # Residual birth proposals only remove established cluster evidence.
-            sources=[(*c.position.state[:2],c.amplitude,c.sigma) for c in self.belief.clusters
-                     if c.confirmed]
-            predicted=predict_field(msg.width,msg.height,msg.resolution,msg.origin_x,msg.origin_y,
-                                    self.ambient,sources)
-            residual=temp-predicted+self.ambient
-            # Surface maps describe occupied surface samples. Subtraction is local
-            # cluster evidence suppression, not a physical Gaussian surface claim.
-            births=(detections if msg.measurement_type=="surface_radiance" else
-                    self.extractor.extract_detections(residual,conf,*kwargs))
+            births=detections
+            if msg.measurement_type!="surface_radiance":
+                # Gaussian residual births apply only to direct field observations.
+                sources=[(*c.position.state[:2],c.amplitude,c.sigma)
+                         for c in self.belief.clusters if c.confirmed]
+                predicted=predict_field(msg.width,msg.height,msg.resolution,msg.origin_x,
+                                        msg.origin_y,self.ambient,sources)
+                births=self.extractor.extract_detections(temp-predicted+self.ambient,conf,*kwargs)
             def visibility(x,y):
                 ix=int(np.floor((x-msg.origin_x)/msg.resolution))
                 iy=int(np.floor((y-msg.origin_y)/msg.resolution))

@@ -20,7 +20,6 @@ Fixes (v2):
 """
 
 import json
-import math
 import sys
 from pathlib import Path
 

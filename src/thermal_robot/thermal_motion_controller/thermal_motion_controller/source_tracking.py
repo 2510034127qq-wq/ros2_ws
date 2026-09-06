@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -44,7 +44,6 @@ class TrackedSource:
     status: str = STATUS_CANDIDATE
     consecutive_observations: int = 1
     ever_confirmed: bool = False
-    first_confirmed_s: float = -1.0
 
 
 class SourceTrackerCore:
@@ -481,7 +480,6 @@ class SourceTrackerCore:
                     and max(tr.covariance_xx, tr.covariance_yy) <= self.confirm_covariance_max):
                 tr.status = STATUS_CONFIRMED
                 tr.ever_confirmed = True
-                tr.first_confirmed_s = now_s
             if now_s-tr.last_seen_s > self.duplicate_memory_s and tr.existence_probability < 0.05:
                 self._tracks.pop(tr.track_id, None)
                 self._filters.pop(tr.track_id, None)

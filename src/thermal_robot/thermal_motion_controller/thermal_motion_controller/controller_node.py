@@ -78,7 +78,7 @@ from thermal_motion_controller.navigation_policy import (
     decide_goal_action,
     forward_clearance,
 )
-from thermal_motion_controller.belief import detection_information
+from thermal_motion_controller.belief import source_information_gain
 from thermal_motion_controller.runtime_policy import (
     slow_output_usable, surface_approach_waypoint, CoverageSweep, exploration_goal_due,
     ExplorationProgress)
@@ -266,9 +266,6 @@ class ControllerNode(Node):
         self.declare_parameter('min_gradient_mag',           0.15)
         self.declare_parameter('peak_window_s',              4.0)
         self.declare_parameter('peak_temp_delta',           15.0)
-        self.declare_parameter('plateau_thresh',             2.0)
-        self.declare_parameter('peak_confirm_s',             1.5)
-        self.declare_parameter('peak_confirm_lin_vel',       0.0)
         self.declare_parameter('ambient_temp',              -1.0)
         self.declare_parameter('ambient_update_margin',      1.5)
         self.declare_parameter('rearm_cool_delta',           6.0)
@@ -306,7 +303,6 @@ class ControllerNode(Node):
         self.declare_parameter('escape_loop_max',            3)
         self.declare_parameter('escape_loop_window_s',      30.0)
         self.declare_parameter('pre_peak_thresh_ratio',      0.25)
-        self.declare_parameter('converge_circle_radius',     1.5)
         self.declare_parameter('converge_lin_vel',           0.10)
         self.declare_parameter('converge_max_s',            90.0)
         self.declare_parameter('sample_hold_s',              3.0)
@@ -319,7 +315,6 @@ class ControllerNode(Node):
         self.declare_parameter('post_confirm_rounds',        10)
         self.declare_parameter('post_confirm_min_d',          7.0)
         self.declare_parameter('post_confirm_dist_sigma',    15.0)
-        self.declare_parameter('levy_post_confirm_step',     10.0)
         self.declare_parameter('random_seed',                 0)
         self.declare_parameter('strategy',                    'full')
         self.declare_parameter('residual_planner_min_evidence', 1.5)
@@ -401,9 +396,6 @@ class ControllerNode(Node):
         self._min_gmag     = float(g('min_gradient_mag').value)
         self._win_n        = max(4, int(float(g('peak_window_s').value)*self._rate))
         self._pk_tdelta    = float(g('peak_temp_delta').value)
-        self._plateau      = float(g('plateau_thresh').value)
-        self._pk_conf_s    = float(g('peak_confirm_s').value)
-        self._pk_conf_lin  = float(g('peak_confirm_lin_vel').value)
         _ambient_param     = float(g('ambient_temp').value)
         self._amb_margin   = float(g('ambient_update_margin').value)
         self._rearm_delta  = float(g('rearm_cool_delta').value)
@@ -441,7 +433,6 @@ class ControllerNode(Node):
         self._esc_loop_max = int(g('escape_loop_max').value)
         self._esc_loop_win = float(g('escape_loop_window_s').value)
         self._pre_pk_ratio = float(g('pre_peak_thresh_ratio').value)
-        self._conv_r       = float(g('converge_circle_radius').value)
         self._conv_lin     = float(g('converge_lin_vel').value)
         self._conv_max_s   = float(g('converge_max_s').value)
         self._sample_hold  = float(g('sample_hold_s').value)
@@ -454,7 +445,6 @@ class ControllerNode(Node):
         self._pc_rounds           = int(g('post_confirm_rounds').value)
         self._pc_min_d            = float(g('post_confirm_min_d').value)
         self._pc_dist_sigma       = float(g('post_confirm_dist_sigma').value)
-        self._levy_pc_step        = float(g('levy_post_confirm_step').value)
         self._random_seed         = int(g('random_seed').value)
         self._strategy_mode       = str(g('strategy').value or 'full')
         if self._strategy_mode not in ('full', 'frontier', 'levy', 'residual', 'fast', 'dual', 'gp_ucb'):
@@ -621,7 +611,6 @@ class ControllerNode(Node):
             planner_map_stale_s=self._planner_map_stale_s,
         ))
 
-        self._pre_pk_thresh = self._pre_pk_ratio * self._pk_tdelta
 
         # ── Ambient temperature calibration ───────────────────────────────
         if _ambient_param > 0:
@@ -666,7 +655,6 @@ class ControllerNode(Node):
         self._peak_cand_t: Optional[float] = None
         self._peak_armed   = True
         self._t0           = time.monotonic()
-        self._last_found_t = time.monotonic()
 
         # ── State machine ─────────────────────────────────────────────────
         self._state         = STATE_FRONTIER_NAV
@@ -677,10 +665,8 @@ class ControllerNode(Node):
         self._escape_mode: str                          = EMODE_SOURCE_AVOID
 
         # ── CONVERGE ─────────────────────────────────────────────────────
-        self._converge_center: Optional[Tuple[float,float]] = None
         self._converge_best_T: float = 0.0
         self._converge_best_pos: Optional[Tuple[float,float]] = None
-        self._converge_ang_vel: float = 0.0
         self._conv_cold_t: Optional[float] = None
         self._conv_sticky_count:    int   = 0
         self._conv_best_global_T:   float = 0.0
@@ -1128,7 +1114,6 @@ class ControllerNode(Node):
             shape = (msg.height, msg.width)
             self._thermal_map = {
                 'measurement_type': msg.measurement_type,
-                'last_view_distance_m':np.asarray(msg.last_view_distance_m,dtype=np.float32).reshape(shape) if len(msg.last_view_distance_m)==msg.width*msg.height else np.ones(shape),
                 'width': int(msg.width),
                 'height': int(msg.height),
                 'resolution': float(msg.resolution),
@@ -1141,11 +1126,9 @@ class ControllerNode(Node):
                 'last_seen_age_s': np.asarray(msg.last_seen_age_s, dtype=np.float32).reshape(shape),
             }
             n_cells = int(msg.width) * int(msg.height)
-            if len(msg.view_state) == n_cells and len(msg.view_sectors) == n_cells:
+            if len(msg.view_state) == n_cells:
                 self._thermal_map['view_state'] = np.asarray(
                     msg.view_state, dtype=np.uint8).reshape(shape)
-                self._thermal_map['view_sectors'] = np.asarray(
-                    msg.view_sectors, dtype=np.uint8).reshape(shape)
             self._thermal_map_t = time.monotonic()
         except ValueError as exc:
             if not hasattr(self, '_map_shape_warned'):
@@ -1325,15 +1308,14 @@ class ControllerNode(Node):
         if msg is None: return None
         yy,xx=np.indices((m['height'],m['width']))
         x=m['origin_x']+(xx+.5)*m['resolution'];y=m['origin_y']+(yy+.5)*m['resolution']
+        points=np.stack((x,y),axis=-1)
         gain=np.zeros(x.shape)
         for c in msg.sources:
-            p=float(c.existence_probability)
             covariance=np.array([[c.covariance_xx,c.covariance_xy],[c.covariance_xy,c.covariance_yy]])
             if not np.isfinite(covariance).all(): return None
-            entropy=detection_information(p,self._posterior_pd,self._posterior_pf)
-            localization=max(0.,.5*np.linalg.slogdet(np.eye(2)+covariance/self._posterior_variance)[1])
-            gain+=np.exp(-((x-c.position.x)**2+(y-c.position.y)**2)/
-                (2*self._residual_planner_footprint_radius**2))*(entropy+p*self._posterior_pd*localization)
+            gain+=source_information_gain(points,(c.position.x,c.position.y),covariance,
+                c.existence_probability,self._residual_planner_footprint_radius,
+                self._posterior_pd,self._posterior_pf,self._posterior_variance)
         return gain
 
     def _surface_timer(self,now):
@@ -1381,7 +1363,7 @@ class ControllerNode(Node):
                 if self._surface_hold_start is None: self._surface_hold_start=now
                 if now-self._surface_hold_start>=self._surface_hold and target['status']=='confirmed':
                     self._surface_seen_ids.add(target['id'])
-                    self._last_found_t=now;self._surface_wp=None
+                    self._surface_wp=None
                     self.get_logger().info(f'[SURFACE_CONFIRMED] {target["id"]} '
                         f'pos=({target["x"]:.2f},{target["y"]:.2f}) range={distance:.2f}')
                 return
@@ -2263,7 +2245,6 @@ class ControllerNode(Node):
         now=time.monotonic()
         self._cancel_nav2_goal()
         self._state=STATE_CONVERGE; self._state_t=now
-        self._converge_center=(self._wx,self._wy)
         self._converge_best_T=self._current_temp()
         self._converge_best_pos=(self._wx,self._wy)
         self._conv_cold_t=None; self._conv_returning=False
@@ -2296,12 +2277,11 @@ class ControllerNode(Node):
             if (self._conv_sticky_count<self._conv_sticky_max
                     and self._conv_best_global_T-self._ambient_est>=sample_trigger):
                 self._conv_sticky_count+=1; self._conv_returning=True
-                self._converge_center=self._conv_best_global_pos
                 self._converge_best_T=0.0; self._converge_best_pos=None
                 self._conv_cold_t=None; self._state_t=now
                 self._pub.publish(Twist()); return
             self._state=STATE_FRONTIER_NAV; self._state_t=now
-            self._converge_center=None; self._conv_cold_t=None
+            self._conv_cold_t=None
             self._conv_sticky_count=0; self._conv_returning=False
             self._refresh_frontier(now,force=True); self._pub.publish(Twist()); return
         if trise<self._adapt_pre_pk_thresh()*0.3:
@@ -2313,7 +2293,7 @@ class ControllerNode(Node):
                         lin,ang=self._drive_toward_yaw(self._yaw_toward(bx,by),0.12)
                         self._pub.publish(self._make_cmd(lin,ang)); return
                 self._state=STATE_FRONTIER_NAV; self._state_t=now
-                self._converge_center=None; self._conv_cold_t=None
+                self._conv_cold_t=None
                 self._refresh_frontier(now,force=True); self._pub.publish(Twist()); return
         else:
             self._conv_cold_t=None
@@ -2391,11 +2371,10 @@ class ControllerNode(Node):
                 sx = sy = None
             if est is not None and not self._is_near_known_pos(sx, sy, radius=self._excl_r):
                 self._found_sources.append((sx,sy,T))
-                self._last_found_t=now; self._esc_loop_count=0
+                self._esc_loop_count=0
                 self._bmap.mark_excluded(sx,sy,self._excl_r)
                 self._bmap.suppress_confirmed_source(sx,sy,self._excl_r+1.0)
                 self._peak_armed=False; self._state=STATE_AT_PEAK; self._state_t=now
-                self._converge_center=None
                 kstr=', '.join(f'({s[0]:.1f},{s[1]:.1f})' for s in self._found_sources)
                 elapsed=now-self._t0
                 self.get_logger().info(

@@ -68,7 +68,6 @@ class SourceTrackerNode(Node):
         self._strategy=str(g('strategy').value)
         self._slow_timeout=float(g('slow_timeout_s').value)
         self._last_prior_revision = -1
-        self._t0 = time.monotonic()
         self._last_log_s = 0.0
         self._last_confirmed = set()
 

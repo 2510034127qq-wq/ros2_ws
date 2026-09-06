@@ -12,7 +12,6 @@ v13 Config-B 通用性验证配置：
 """
 
 import math
-import time
 
 import numpy as np
 import rclpy
@@ -24,10 +23,6 @@ from nav_msgs.msg import Odometry
 from thermal_interfaces.msg import SourceEstimate, SourceEstimateArray
 
 from thermal_sensor_sim.scenario import (
-    SENSOR_FOV_X,
-    SENSOR_FOV_Y,
-    SPAWN_X,
-    SPAWN_Y,
     SourceState,
     apply_run_seed,
     default_config_b_scenario,
@@ -94,7 +89,6 @@ class SensorNode(Node):
         self._spawn_y = self._scenario.spawn_y
         self._fov_x = self._scenario.fov_x
         self._fov_y = self._scenario.fov_y
-        self._t0      = time.monotonic()
 
         g=lambda name:self.get_parameter(name).value
         self._intrinsics=CameraIntrinsics.from_hfov(self._W,self._H,float(g('camera_hfov_deg')))

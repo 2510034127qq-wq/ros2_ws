@@ -33,7 +33,6 @@ thermal_mapper_node:
     projection_near_m: 0.15
     projection_far_m: 15.0
     pose_from_tf: false
-    sector_memory_s: 60.0
 source_tracker_node:
   ros__parameters:
     update_rate: 2.0

@@ -36,7 +36,6 @@ plot_all_figures.py — 热导航仿真全量可视化生成器 v3
 import csv
 import json
 import math
-import os
 import re
 import sys
 from datetime import datetime
@@ -61,7 +60,6 @@ except Exception:          # 兼容 NumPy 2.x 下 scipy ABI 不匹配
     def gaussian_filter(arr, sigma=1.0):
         """scipy 不可用时的简易均值滤波降级实现。"""
         import numpy as _np
-        from numpy.lib.stride_tricks import sliding_window_view
         k = max(1, int(sigma * 2) | 1)   # 奇数窗口
         pad = k // 2
         padded = _np.pad(arr, pad, mode='edge')

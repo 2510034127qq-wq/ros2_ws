@@ -5,7 +5,7 @@ cardinality PMF is their exact convolution under the cluster independence
 approximation. Association is a gated maximum-score approximation, not an
 exact multi-object posterior. No ground truth or ROS types enter this module.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import copy
 import math
 import time
@@ -62,6 +62,16 @@ def detection_information(p, pd, pf):
     pm = p*(1-pd)/max(1-hit, 1e-12)
     return float(max(0., bernoulli_entropy(p) - hit*bernoulli_entropy(ph)
                      - (1-hit)*bernoulli_entropy(pm)))
+
+
+def source_information_gain(points, position, covariance, probability, radius,
+                            p_detection, false_alarm_probability, measurement_variance):
+    """Expected existence and localization gain at candidate observation points."""
+    distance_sq=np.sum((np.asarray(points)-position)**2,axis=-1)
+    footprint=np.exp(-distance_sq/(2*radius**2))
+    existence=detection_information(probability,p_detection,false_alarm_probability)
+    localization=max(0.,.5*np.linalg.slogdet(np.eye(2)+covariance/measurement_variance)[1])
+    return footprint*(existence+probability*p_detection*localization)
 
 
 class SourceBelief:
@@ -229,15 +239,3 @@ class SourceBelief:
         for c in self.clusters:
             pmf=np.convolve(pmf,[1-c.probability,c.probability])
         return pmf
-
-    def information_gain(self, points, radius=3.0):
-        points=np.asarray(points,dtype=float).reshape(-1,2)
-        gain=np.zeros(len(points))
-        p=self.params
-        for c in self.clusters:
-            footprint=np.exp(-np.sum((points-c.position.state[:2])**2,axis=1)/(2*radius**2))
-            existence=detection_information(c.probability,p.p_detection,p.false_alarm_probability)
-            cov=c.position.covariance[:2,:2]
-            localization=.5*np.linalg.slogdet(np.eye(2)+cov/p.measurement_variance)[1]
-            gain += footprint*(existence+c.probability*p.p_detection*localization)
-        return gain
