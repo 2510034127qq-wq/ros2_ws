@@ -36,29 +36,29 @@ def test_position_filter_smooths_noise_without_drifting_during_occlusion():
         filt.predict(109.)
 
 
-def test_static_tracker_keeps_identity_across_short_occlusion():
-    tracker = SourceTrackerCore(estimator_model='kalman', stale_after_s=2.,
-                                confirm_observations=3)
-    for t in range(12):
-        tracker.update([det(3.+.05*np.sin(t))], float(t))
+@pytest.mark.parametrize('estimator', ['legacy','kalman'])
+def test_static_tracker_keeps_identity_across_long_absence(estimator):
+    tracker = SourceTrackerCore(estimator_model=estimator, confirm_observations=3)
+    for stamp in range(12): tracker.update([det(3.+.05*np.sin(stamp))], float(stamp))
     track = tracker.tracks[0]
-    key, last = track.track_id, track.x
-    for t in (12., 13., 14.):
-        tracker.update([], t)
-    assert track.status == 'stale' and track.x == last
-    tracker.update([det(3.)], 15.)
-    assert len(tracker.tracks) == 1 and track.track_id == key
-    assert track.status == 'confirmed'
+    key, position, probability = track.track_id, (track.x,track.y), track.existence_probability
+    tracker.update([], 1200.)
+    assert tracker.tracks == [track] and track.status == 'confirmed'
+    assert (track.x,track.y) == position and track.existence_probability == probability
+    assert track.last_seen_s == 11.
+    tracker.update([det(3.)],1201.)
+    assert tracker.tracks == [track] and track.track_id == key and track.status == 'confirmed'
 
 
 def test_five_static_sources_with_incremental_visibility_have_stable_labels():
-    b = SourceBelief(BeliefParams(budget_ms=1000, confidence_memory_s=1000))
+    b = SourceBelief(BeliefParams(budget_ms=1000))
+    tracker = SourceTrackerCore(estimator_model="kalman")
     keys = None
     for t in range(30):
         # The fifth heater exists from the start but is initially outside view.
         detections = [det(4*i+.03*np.sin(t+i), 2.*(i%2), 20.+i)
                       for i in range(5) if i < 4 or t >= 5]
-        assert b.update(detections, float(t), lambda x,y: 1.)
+        assert b.update(tracker.update(detections,float(t)),float(t))
         assert len(b.clusters) <= 5
         assert b.cardinality().sum() == pytest.approx(1.)
         if t == 15:
@@ -114,48 +114,56 @@ def test_legacy_policy_leaves_peak_without_declaring_search_complete(immediate, 
 
 
 
-def test_belief_count_occlusion_false_positive_pruning():
-    b=SourceBelief(BeliefParams(budget_ms=1000,confidence_memory_s=1000))
-    for t in range(6):
-        assert b.update([det(0),det(4)],float(t),lambda x,y:1.)
-    pmf=b.cardinality()
-    assert np.argmax(pmf)==2 and pmf[2]>.95 and sum(pmf)==pytest.approx(1)
-    p=b.clusters[0].probability
-    b.update([],6.,lambda x,y:0.)
-    assert b.clusters[0].probability>.99*p
-    for t in range(7,20):
-        b.update([],float(t),lambda x,y:1.)
-    assert len(b.clusters)==0
-
-
-def test_belief_residual_birth_and_transactional_budget():
+def test_belief_follows_registry_confirmation_and_candidate_removal():
+    tracker=SourceTrackerCore(estimator_model='kalman',candidate_timeout_s=3.)
     b=SourceBelief(BeliefParams(budget_ms=1000))
-    b.update([det(0)],0.,birth_detections=[])
-    assert not b.clusters
-    b.update([det(0)],1.,birth_detections=[det(0)])
-    assert len(b.clusters)==1
-    stamp=b.stamp_s
+    for t in range(8):
+        b.update(tracker.update([det(0),det(4)],float(t)),float(t))
+    keys=[c.label for c in b.clusters]
+    assert np.argmax(b.cardinality())==2 and b.cardinality()[2]>.95
+    b.update(tracker.update([det(10)],8.),8.)
+    assert len(b.clusters)==3
+    b.update(tracker.update([],1200.),1200.)
+    assert [c.label for c in b.clusters]==keys
+    assert all(c.confirmed for c in b.clusters)
+    assert [c.last_seen_s for c in b.clusters]==[7.,7.]
+
+
+def test_belief_registry_update_is_transactional_on_budget_failure():
+    tracker=SourceTrackerCore(estimator_model='kalman')
+    b=SourceBelief(BeliefParams(budget_ms=1000))
+    assert b.update(tracker.update([det(0)],0.),0.)
+    key=b.clusters[0].label
     b.params.budget_ms=-1
-    assert not b.update([det(1)],2.)
-    assert b.stamp_s==stamp and b.health=='over_budget'
+    assert not b.update(tracker.update([det(0),det(4)],1.),1.)
+    assert b.stamp_s==0. and b.health=='over_budget' and [c.label for c in b.clusters]==[key]
 
 
 def test_invalid_slow_observation_preserves_last_good_posterior():
+    import copy
+    tracker=SourceTrackerCore(estimator_model='kalman')
     b=SourceBelief(BeliefParams(budget_ms=1000))
-    assert b.update([det(1.)],1.)
+    registry=tracker.update([det(1.)],1.)
+    assert b.update(registry,1.)
     before=b.clusters[0].position.state.copy()
-    assert not b.update([det(float('nan'))],2.)
+    broken=copy.deepcopy(registry);broken[0].x=float('nan')
+    assert not b.update(broken,2.)
     assert b.health=='invalid:ValueError' and b.stamp_s==1.
     assert np.array_equal(before,b.clusters[0].position.state)
-    assert b.update([det(1.2)],3.) and b.health=='ready'
+    assert b.update(tracker.update([det(1.2)],3.),3.) and b.health=='ready'
 
 
-def test_belief_split_birth_does_not_erase_parent():
+def test_belief_uses_canonical_ids_without_spatial_rematching():
+    import copy
+    tracker=SourceTrackerCore(estimator_model='kalman')
     b=SourceBelief(BeliefParams(budget_ms=1000))
-    for t in range(6): b.update([det(0)],float(t))
-    for t in range(6,12): b.update([det(0),det(1.)],float(t))
-    assert len(b.clusters)==2 and np.argmax(b.cardinality())==2
-    assert b.clusters[0].confirmed
+    for t in range(8):b.update(tracker.update([det(0),det(4)],float(t)),float(t))
+    registry=copy.deepcopy(tracker.tracks)
+    # Registry is authoritative even when a map correction puts entries close together.
+    registry[1].x=.1
+    assert b.update(registry,8.)
+    assert [c.label for c in b.clusters]==[tr.track_id for tr in registry]
+    assert all(c.confirmed for c in b.clusters)
 
 
 
@@ -200,7 +208,8 @@ def test_belief_field_fit_infers_amplitude_and_scale():
     b=SourceBelief(BeliefParams(budget_ms=1000))
     m=dict(temperature_mean=temp,confidence=np.ones_like(temp),resolution=.25,
            origin_x=0.,origin_y=0.,ambient=22.,last_seen_age_s=np.zeros_like(temp))
-    for t in range(8):b.update([det(5,5,30)],float(t),field_snapshot=m)
+    tracker=SourceTrackerCore(estimator_model="kalman")
+    for t in range(8):b.update(tracker.update([det(5,5,30)],float(t)),float(t),field_snapshot=m)
     c=b.clusters[0]
     assert c.amplitude==pytest.approx(30,abs=5) and c.sigma==pytest.approx(1.2,abs=.3)
 
@@ -236,18 +245,11 @@ def test_surface_approach_selects_free_footprint_and_rejects_unknown_space():
     assert surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view) is None
 
 
-def test_merge_requires_persistent_overlap_and_preserves_confirmed_identities():
-    from thermal_motion_controller.belief import SourceCluster
-    from thermal_motion_controller.position_filter import PositionFilter
-    b=SourceBelief(BeliefParams(merge_hits=3))
-    b.clusters=[SourceCluster(str(i),PositionFilter(np.array([x,0.])),.4,20.,.6,0.)
-                for i,x in enumerate((0.,.2))]
-    b._merge();b._merge()
-    assert len(b.clusters)==2
-    b._merge()
-    assert len(b.clusters)==1
-    assert np.linalg.eigvalsh(b.clusters[0].position.covariance).min()>0
-    other=SourceCluster('other',PositionFilter(np.array([.1,0.])),.99,20.,.6,0.,confirmed=True)
-    b.clusters[0].confirmed=True;b.clusters.append(other)
-    for _ in range(5):b._merge()
-    assert len(b.clusters)==2
+def test_registry_rejects_duplicate_hot_faces_but_keeps_nearby_distinct_sources():
+    tracker=SourceTrackerCore(estimator_model='kalman',merge_radius_m=.8,gate_m=1.25)
+    for t in range(8): tracker.update([det(0),det(.3),det(1.8)],float(t))
+    assert len(tracker.tracks)==2 and all(t.status=='confirmed' for t in tracker.tracks)
+    keys=[t.track_id for t in tracker.tracks]
+    tracker.update([],1000.)
+    tracker.update([det(.2),det(1.7)],1001.)
+    assert [t.track_id for t in tracker.tracks]==keys

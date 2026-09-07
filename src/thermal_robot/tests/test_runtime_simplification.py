@@ -58,32 +58,62 @@ def test_mapper_configured_threshold_changes_visibility(threshold, blocked):
     assert visibility.line_reachable_known_free(node._occ_view, .5, .5, 2.5, .5) != blocked
 
 
-@pytest.mark.parametrize('measurement_type,expected_extractions',
-                         [('surface_radiance', 1), ('field_direct', 2)])
-def test_slow_births_skip_gaussian_prediction_only_for_surface(measurement_type, expected_extractions):
-    extractions, predictions, births = [], [], []
-    def extract(temp, *args):
-        result = [float(temp[0, 0])]
-        extractions.append(result)
-        return result
-    def predict(*args):
-        predictions.append(args)
-        return np.array([[25.]])
-    def update(detections, stamp, visible, birth_candidates, snapshot):
-        births.extend(birth_candidates)
-        return False
-    callback = method('thermal_motion_controller', 'belief_node', '_tick', np=np, time=time,
-                      predict_field=predict, BeliefState=lambda:NS(sources=[], cardinality_pmf=[]))
-    message = NS(header=NS(stamp=NS(sec=1, nanosec=0)), height=1, width=1, resolution=1.,
-                 origin_x=0., origin_y=0., temperature_mean=[30.], confidence=[1.],
-                 last_seen_age_s=[0.], measurement_type=measurement_type)
-    output = []
-    node = NS(latest=message, mode='online', last_stamp=None, ambient=22., freshness=1.5,
-              revision=0, params=NS(budget_ms=1000), extractor=NS(extract_detections=extract),
-              belief=NS(clusters=[], update=update, health='ready'), pub=NS(publish=output.append),
-              get_logger=lambda:NS(info=lambda text:None, error=pytest.fail))
+
+@pytest.mark.parametrize('measurement_type', ['surface_radiance','field_direct'])
+def test_slow_node_publishes_canonical_identity_and_historical_age(measurement_type):
+    from thermal_motion_controller.belief import SourceBelief, BeliefParams
+    from thermal_motion_controller.source_tracking import TrackedSource
+    callback=method('thermal_motion_controller','belief_node','_tick',np=np,time=time,
+        TrackedSource=TrackedSource, BeliefState=lambda:NS(sources=[],cardinality_pmf=[]),
+        SourceEstimate=lambda:NS(position=NS(x=0.,y=0.)))
+    header=NS(stamp=NS(sec=100,nanosec=0),frame_id='world')
+    source=NS(id='canonical_42',position=NS(x=.5,y=.5),strength=20.,sigma=.6,
+        existence_probability=.99,confidence=.95,observations=8,age_s=50.,
+        covariance_xx=.2,covariance_xy=0.,covariance_yy=.2,status='confirmed')
+    output=[]
+    node=NS(latest=NS(header=header,sources=[source]),latest_map=NS(header=header,
+        height=1,width=1,temperature_mean=[22.],confidence=[1.],last_seen_age_s=[0.],
+        resolution=1.,origin_x=0.,origin_y=0.,measurement_type=measurement_type),
+        mode='online',last_stamp=None,revision=0,ambient=22.,freshness=1.5,
+        params=BeliefParams(budget_ms=1000),belief=SourceBelief(BeliefParams(budget_ms=1000)),
+        pub=NS(publish=output.append),get_logger=lambda:NS(info=lambda text:None,error=pytest.fail))
     callback(node)
-    assert len(extractions) == expected_extractions
-    assert len(predictions) == expected_extractions-1
-    assert births == ([30.] if measurement_type == 'surface_radiance' else [27.])
-    assert output[0].health == 'ready'
+    result=output[-1].sources[0]
+    assert result.id=='canonical_42' and result.status=='confirmed' and result.age_s==50.
+    assert output[-1].health=='ready'
+    callback(node)
+    assert len(output)==1  # A cached registry frame is not another observation.
+
+
+def test_slow_feedback_matches_by_id_even_when_another_source_is_nearer():
+    from thermal_motion_controller.position_filter import PositionFilter
+    from thermal_motion_controller.runtime_policy import slow_output_usable
+    callback=method('thermal_motion_controller','source_tracker_node','_prior_cb',
+                    np=np,slow_output_usable=slow_output_usable)
+    tracks=[NS(track_id=key,x=x,y=0.,status='confirmed',last_seen_s=10.)
+            for key,x in [('a',0.),('b',.3)]]
+    filters={t.track_id:PositionFilter(np.array([t.x,0.]),np.eye(2)*.2) for t in tracks}
+    node=NS(_slow_prior_enabled=True,_last_prior_revision=-1,_strategy='dual',_slow_timeout=3.,
+        _last_update=10.,get_clock=lambda:NS(now=lambda:NS(nanoseconds=10_000_000_000)),
+        _tracker=NS(estimator_model='kalman',tracks=tracks,_filters=filters,max_detection_age_s=1.5,gate_m=1.25))
+    source=NS(id='b',status='confirmed',position=NS(x=.05,y=0.),covariance_xx=.2,covariance_yy=.2)
+    message=NS(mode='online',health='ready',revision=1,header=NS(stamp=NS(sec=10,nanosec=0)),sources=[source])
+    callback(node,message)
+    assert filters['a'].state[0]==0. and .05<filters['b'].state[0]<.3
+    before=filters['b'].state.copy()
+    source.id='unknown';message.revision=2
+    callback(node,message)
+    np.testing.assert_array_equal(filters['b'].state,before)
+
+
+def test_controller_retains_known_source_and_processed_id_across_observation_gap():
+    callback=method('thermal_motion_controller','controller_node','_sources_cb',time=time)
+    source=NS(id='src_1',status='confirmed',position=NS(x=2.,y=3.),strength=20.,
+        existence_probability=.99,confidence=.9,observations=8,age_s=1000.,
+        covariance_xx=.2,covariance_yy=.2,sigma=.6)
+    node=NS(_strategy_mode='dual',_ambient_est=22.,_surface_seen_ids={'src_1'})
+    callback(node,NS(sources=[source]))
+    assert node._found_sources==[(2.,3.,42.)] and node._surface_seen_ids=={'src_1'}
+    source.age_s=0.;source.observations+=1
+    callback(node,NS(sources=[source]))
+    assert node._surface_seen_ids=={'src_1'} and len(node._found_sources)==1

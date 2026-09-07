@@ -39,7 +39,6 @@ source_tracker_node:
     position_noise_std: 0.05
     measurement_variance: 0.15
     association_gate_chi2: 9.21
-    cold_evidence_decay_s: 2.0
     max_tracks: 32
     slow_prior_enabled: true
     slow_timeout_s: 3.0
@@ -49,22 +48,8 @@ belief_node:
     update_rate: 1.0
     ambient_temp: 22.0
     freshness_s: 1.5
-    residual_birth_threshold: 3.0
-    detection_merge_m: 0.5
-    max_sources: 16
     position_noise_std: 0.05
     measurement_variance: 0.2
-    gate_chi2: 9.21
-    gate_m: 3.0
-    confidence_memory_s: 180.0
-    p_detection: 0.85
-    false_alarm_probability: 0.03
-    candidate_probability: 0.15
-    prune_probability: 0.025
-    confirm_probability: 0.90
-    confirm_hits: 3
-    merge_distance_m: 0.45
-    merge_hits: 3
     budget_ms: 100.0
     field_fit_radius_m: 3.0
     sigma_min_m: 0.25
@@ -74,7 +59,7 @@ controller_node:
     slow_timeout_s: 3.0
     residual_enabled: true
     posterior_information_weight: 1.0
-    # Keep these observation assumptions aligned with belief_node when tuning.
+    # Observation assumptions used by the information-gain planner.
     posterior_detection_probability: 0.85
     posterior_false_alarm_probability: 0.03
     posterior_measurement_variance: 0.2

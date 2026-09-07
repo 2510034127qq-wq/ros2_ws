@@ -1,4 +1,4 @@
-"""Regressions for identity theft, negative evidence, and incomplete exploration."""
+"""Regressions for identity theft, static source memory, and incomplete exploration."""
 import math
 from pathlib import Path
 import sys
@@ -48,7 +48,7 @@ def confirmed_tracker():
 
 
 @pytest.mark.parametrize('visibility', ['cold', 'unseen', 'old', 'hot_neighbour'])
-def test_only_current_cold_evidence_retires_a_heat_source(visibility):
+def test_observation_changes_do_not_erase_registered_identity(visibility):
     tracker = confirmed_tracker()
     temp = np.full((20, 20), 22.)
     conf = np.ones_like(temp)
@@ -65,12 +65,10 @@ def test_only_current_cold_evidence_retires_a_heat_source(visibility):
     for t in range(8, 14):
         tracker.update_from_map(temp, conf, .25, 0., 0., float(t), age)
     track = tracker.tracks[0]
-    if visibility == 'cold':
-        assert track.status == 'stale' and track.existence_probability < .1
-        tracker.update([detection(2.125, 2.125)], 14.)
-        assert track.status == 'candidate'  # A single warm return isn't confirmation.
-    else:
-        assert track.existence_probability > .7
+    assert track.status == 'confirmed' and track.existence_probability > .9
+    key=track.track_id
+    tracker.update([detection(2.125,2.125)],14.)
+    assert tracker.tracks[0].track_id==key and tracker.tracks[0].status=='confirmed'
 
 
 def test_repeated_cached_cold_frame_is_not_independent_death_evidence():
@@ -83,7 +81,7 @@ def test_repeated_cached_cold_frame_is_not_independent_death_evidence():
 
 
 @pytest.mark.parametrize('occluded', [False, True])
-def test_surface_render_projection_fusion_and_tracker_distinguish_extinction_from_occlusion(occluded):
+def test_surface_observation_loss_preserves_registered_position_and_age(occluded):
     for package in ('thermal_sensor_sim', 'thermal_field_reconstructor'):
         sys.path.insert(0, str(ROOT/package))
     from thermal_sensor_sim.surface_scene import SurfaceObject, SurfaceRenderer, SensorEffects
@@ -114,10 +112,8 @@ def test_surface_render_projection_fusion_and_tracker_distinguish_extinction_fro
             snapshot.origin_x,snapshot.origin_y,now,snapshot.last_seen_age_s)
     assert len(tracker.tracks) == 1
     track = tracker.tracks[0]
-    if occluded:
-        assert track.existence_probability > .45
-    else:
-        assert track.status == 'stale' and track.existence_probability < .1
+    assert track.status == 'confirmed' and track.track_id == 'src_1'
+    assert track.last_seen_s < now-1.5  # Historical identity does not fabricate a fresh detection.
 
 
 def test_sweep_requires_observed_rotation_and_restarts_after_travel():

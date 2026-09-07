@@ -1,0 +1,350 @@
+{
+  "base_commit": "55c7c5d0a7519582c832defbcd5099ba8d051c4d",
+  "runtime_python_lines": {
+    "before": 8507,
+    "after": 8159
+  },
+  "pytest_passed": 182,
+  "built_packages": [
+    "thermal_motion_controller",
+    "thermal_bringup"
+  ],
+  "source_install_pairs_matched": 48,
+  "runtime_directory": "bags/software_validation/20260907_static_registry",
+  "runs": [
+    {
+      "case": "b5_202",
+      "duration_s": 180,
+      "passed": true,
+      "failures": [],
+      "found": 5,
+      "total": 5,
+      "missed": [],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.34182712483447936,
+      "unmatched_rows": 0,
+      "path_m": 20.915528792003883,
+      "slow_p99_ms": 0.8376434546709062,
+      "canonical_belief_ids": true,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 98,
+        "fast_only_reports": 2,
+        "navigation_stall_fallbacks": 1,
+        "source_approach_confirmations": 2,
+        "blocked_source_deferrals": 5,
+        "source_nav2_approaches": 3,
+        "camera_sweeps_completed": 4,
+        "fast_update_ms_max": 2.246,
+        "planner_ms_max": 17.5
+      },
+      "fingerprint": "124b980a558c474e39fe2b5073dbb83f39ef682092d6b4f75edb9f2dd2c78a55",
+      "artifact_sha256": {
+        "run.json": "110e02fd2b264ed43d8d0b72e0a8d532ed0173090d4d4efdadb8339004229a69",
+        "sources.json": "7df65db6cf1a6c0266187925d6b2051d9e5550c5557839aa3f542dcc00abb94e",
+        "truth.json": "e8c169ebd1f7aa59269f07a1848624365063d46cdb19fa925b447322c7db38fd",
+        "probe.json": "b68c77425a426345fd42491fa488bf58e00134db7f15b94c5aa79037c86643f9",
+        "detection_metrics.json": "bd5ca9592b08e6961e6a73bcd307b5916c5412d3a0512cea0d5157807aaaa1c1"
+      }
+    },
+    {
+      "case": "b5_303",
+      "duration_s": 180,
+      "passed": true,
+      "failures": [],
+      "found": 5,
+      "total": 5,
+      "missed": [],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.3957604859479458,
+      "unmatched_rows": 0,
+      "path_m": 20.785126785360724,
+      "slow_p99_ms": 0.864804277420044,
+      "canonical_belief_ids": true,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 99,
+        "fast_only_reports": 0,
+        "navigation_stall_fallbacks": 1,
+        "source_approach_confirmations": 2,
+        "blocked_source_deferrals": 5,
+        "source_nav2_approaches": 3,
+        "camera_sweeps_completed": 4,
+        "fast_update_ms_max": 2.363,
+        "planner_ms_max": 15.3
+      },
+      "fingerprint": "124b980a558c474e39fe2b5073dbb83f39ef682092d6b4f75edb9f2dd2c78a55",
+      "artifact_sha256": {
+        "run.json": "4b5dde541d3e1f1fc5c44c726c3cf68aa0ce2471257b3470baafbb00e35c0860",
+        "sources.json": "1136407810d38e086772e41349dd34b103218ac034cc696e7dff29b1aae2b942",
+        "truth.json": "97d9bb5bd43a5d093d12d5aea4096508289856ba67e063e5644751d576c1dc1c",
+        "probe.json": "dfdb1b8c23bc29c87f03d72c96effa57c4c85db647046543783d64d2a4b3b491",
+        "detection_metrics.json": "cc7883f36ac6e5c29f5cc196da270ca84d772c63804a4f757f910f05df8d3faf"
+      }
+    },
+    {
+      "case": "a2_dual",
+      "duration_s": 90,
+      "passed": true,
+      "failures": [],
+      "found": 1,
+      "total": 2,
+      "missed": [
+        "T2_east"
+      ],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.1678902723058542,
+      "unmatched_rows": 0,
+      "path_m": 17.326847039322125,
+      "slow_p99_ms": 1.7160232210159303,
+      "canonical_belief_ids": true,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 54,
+        "fast_only_reports": 0,
+        "navigation_stall_fallbacks": 0,
+        "source_approach_confirmations": 1,
+        "blocked_source_deferrals": 0,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 0,
+        "fast_update_ms_max": 2.506,
+        "planner_ms_max": 39.3
+      },
+      "fingerprint": "124b980a558c474e39fe2b5073dbb83f39ef682092d6b4f75edb9f2dd2c78a55",
+      "artifact_sha256": {
+        "run.json": "0c00712ec5ec0db2068adda129bd8971d79dd2e0e104f5df19547a17a8d0cf45",
+        "sources.json": "d97fd3ae7f991b96f856e99102fb65622ed203e2ec6bcd11368efacab98f29ce",
+        "truth.json": "c19795da4906b1e9f62a24eec36db5f744fc5b74227bf671a954dc4c5d8c2972",
+        "probe.json": "5618b336dc3407aaeec73533da66eee98c5d9f274823bf27f4219eba38e80464",
+        "detection_metrics.json": "2605a52353be2d8542eac573118a2e34e9cbdcf92e1a62964138d77d3b910f65"
+      }
+    },
+    {
+      "case": "a2_legacy",
+      "duration_s": 60,
+      "passed": true,
+      "failures": [],
+      "found": 2,
+      "total": 2,
+      "missed": [],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.8766765289654882,
+      "unmatched_rows": 11,
+      "path_m": 12.718148400714771,
+      "slow_p99_ms": null,
+      "canonical_belief_ids": true,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 0,
+        "fast_only_reports": 40,
+        "navigation_stall_fallbacks": 0,
+        "source_approach_confirmations": 0,
+        "blocked_source_deferrals": 0,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 0,
+        "fast_update_ms_max": 1.317,
+        "planner_ms_max": null
+      },
+      "fingerprint": "124b980a558c474e39fe2b5073dbb83f39ef682092d6b4f75edb9f2dd2c78a55",
+      "artifact_sha256": {
+        "run.json": "536d16464bc7fe93d5b6a1530329bc21d785ed1867db39de1bda108ca4e9a2aa",
+        "sources.json": "ee3cdb76ed1924cfd8251ec2cb1777f27c9a770f3ed6f0e0c0339231ee7e4b30",
+        "truth.json": "40b31a47c6342a77d0acddbe26c74dae83e0b06ca5ab6cf30bb5e2563a6beabd",
+        "probe.json": "94100e1bf3e869c6a9e064210a8e49c4149745f77807d71be41e08fa1549efe0",
+        "detection_metrics.json": "e3e1aceff808cf46674f2ba06226066a813b9d29c13dbeba4ac392c6224e7f73"
+      }
+    }
+  ],
+  "comparison_before": [
+    {
+      "case": "five_obstacles_202",
+      "passed": true,
+      "failures": [],
+      "found": 5,
+      "total": 5,
+      "missed": [],
+      "p95_m": 0.40227892805845816,
+      "duplicate_bins": 0,
+      "switches": 0,
+      "multiple_confirmed_ids": {
+        "S4_southwest": [
+          "src_4",
+          "src_10"
+        ],
+        "S3_southeast": [
+          "src_6",
+          "src_8"
+        ]
+      },
+      "unmatched_fresh_rows": 0,
+      "fresh_rows": 328,
+      "path_m": 20.605094605289157,
+      "belief_p99_ms": 1.3959744596481323,
+      "discovered_by_probe_seconds": {
+        "30": [
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "60": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "90": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "120": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "180": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ]
+      },
+      "fingerprint": "9693d80f9b5dacf17ccd413476b7e1b1abf8212ebea0f984771774a7cdfaf425",
+      "sha256": {
+        "run.json": "a06fc5113fb7759980ad697071a55d821cffa3699650720c92616c080a3f6ba7",
+        "sources.json": "be6919164a1b3e61f4171ac154117dd63e3b82e12b3e39fccc78dc01639f6446",
+        "truth.json": "9b6d9450a0ade48a565a8a3ee01dad563cbf8a16cc0bfd4847f673ca0dcec34b",
+        "probe.json": "81d817b6d59ee60e3403afbe8e284c238d7e0a70a07cf58f835e1747e5a823d7",
+        "detection_metrics.json": "46ce75bd4c6dd72a7b4dc76352263dd3ce1aa128a8feb8821650930c70a2813c"
+      }
+    },
+    {
+      "case": "five_obstacles_303",
+      "passed": true,
+      "failures": [],
+      "found": 5,
+      "total": 5,
+      "missed": [],
+      "p95_m": 0.4480747432529949,
+      "duplicate_bins": 0,
+      "switches": 0,
+      "multiple_confirmed_ids": {
+        "S4_southwest": [
+          "src_5",
+          "src_7"
+        ],
+        "S3_southeast": [
+          "src_6",
+          "src_9"
+        ]
+      },
+      "unmatched_fresh_rows": 0,
+      "fresh_rows": 299,
+      "path_m": 20.769889461941094,
+      "belief_p99_ms": 1.3755280566215513,
+      "discovered_by_probe_seconds": {
+        "30": [
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "60": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "90": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "120": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ],
+        "180": [
+          "S1_north",
+          "S2_east",
+          "S3_southeast",
+          "S4_southwest",
+          "S5_west_weak"
+        ]
+      },
+      "fingerprint": "9693d80f9b5dacf17ccd413476b7e1b1abf8212ebea0f984771774a7cdfaf425",
+      "sha256": {
+        "run.json": "07fe14648830954f6dee33e520bfe798db4805517537a1903310e4e4bc461a39",
+        "sources.json": "fe8cd7395afb960f4e4ae9b3fe84de8b922ef0d043883fd1dd3f6f1eb0399796",
+        "truth.json": "2522446c378c7750439d69464ec90b270b1ce43efa7a3dca8d37c41d1fd12860",
+        "probe.json": "d14ac60bef98618dbec1cd493379f39c06f5d91855025356c4350a4f65e1a4ca",
+        "detection_metrics.json": "769375cc14cf556eb16e3f56deba4855d0d77efa37e794766501c49ec3ac1503"
+      }
+    }
+  ],
+  "comparison_before_summary_sha256": "3f8fba0b94c0d571eae66eaa5e021a5639d6a602c869e3f6a1581ed9bd9ce062",
+  "hardware": {
+    "path": "bags/software_validation/20260907_registry_hardware/result.json",
+    "sha256": "a6e61872064ac987b8b3d76083c638baff1323bd54bf6abb9150d3e9176d6941",
+    "result": {
+      "passed": true,
+      "failures": [],
+      "hot_cells_xy": [
+        [
+          4.125,
+          1.625
+        ],
+        [
+          4.125,
+          1.875
+        ],
+        [
+          4.125,
+          2.125
+        ],
+        [
+          4.125,
+          2.375
+        ]
+      ],
+      "confirmed_sources": [
+        {
+          "id": "src_1",
+          "x": 4.124999999999999,
+          "y": 1.9999999999999993
+        }
+      ],
+      "belief_ready_messages": 17,
+      "motion_messages": 0,
+      "input": "synthetic padded big-endian TLinear and mm depth; static optical TF",
+      "limitation": "No physical camera, calibration, UVC or UGV motion verified."
+    }
+  },
+  "limitations": [
+    "A2 dual online detected 1/2 sources in 90 seconds.",
+    "A2 legacy full/off detected 2/2 in 60 seconds but had 11 unmatched fresh confirmed records.",
+    "These fixed-case checks do not prove full-scene recall, real-hardware performance or zero misregistration.",
+    "Registered static identity survives observation loss within one process session; no automatic revocation or cross-restart persistence."
+  ]
+}

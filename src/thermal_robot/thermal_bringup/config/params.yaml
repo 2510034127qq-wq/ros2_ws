@@ -82,9 +82,7 @@ source_tracker_node:
     confirm_probability:       0.75
     confirm_observations:      5
     confirm_covariance_max:    0.9
-    stale_after_s:            12.0
-    stale_decay_s:            20.0
-    duplicate_memory_s:       60.0
+    candidate_timeout_s:      12.0
     update_alpha_min:          0.08
     max_detection_age_s:       8.0
 

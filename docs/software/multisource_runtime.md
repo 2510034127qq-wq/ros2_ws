@@ -33,15 +33,15 @@ B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时
 ## 快慢层
 
 - 快层默认 2 Hz：二维位置 Gaussian filter、一对一关联、多帧确认。位置在缺测时保持不变，协方差允许地图/配准漂移。关联保留协方差归一化项和实测位置门控，防止不确定的旧标签抢占新观测。
-- 当前冷观测可以降低错误热点假设的置信度；中心和邻域必须获得新观测且没有热支持。未观测、过期和遮挡不等于冷证据，重复缓存帧不重复计数。被反证的假设需要多帧重新确认。
+- 快层是唯一身份登记入口：只有 candidate / confirmed 两种状态。候选需连续多帧、置信度和定位协方差达标才确认，未确认候选超过 `candidate_timeout_s`（默认 12 秒）无观测即清理。已确认静态热源在本次运行中保留 ID、确认状态和登记位置，不按缺测时长或冷观测退役；`age_s` 继续增长，历史登记不表示当前可见。
 - B 级控制在启动、移动 4 米或上次扫描完成 60 秒后进行一周相机转向扫描，完成条件使用里程计累计转角。探索目标到达半径为 0.6 米，正常推进时保持目标；持续 12 秒无位移或 45 秒超时会重选，并临时排除失败目标附近 2 米。地图尚未准备好时等待/扫描，不发起长距离随机退路。参数均在 `multisource.yaml`，需要按底盘和场景调整。
-- 慢层保留带标签的位置高斯、强度/尺度与存在置信度，源数分布由 Bernoulli 卷积得到。残差支持新候选，当前可见却未检测到的证据用于清理错误候选；遮挡只让置信度老化。关联仍是有门控的近似匹配，非精确联合后验。
-- 未充分支持的重叠候选需持续证据才合并；不同已确认标签不因一次接近而合并。删除速度条件、运动外推和生灭事件记录。
+- 慢层订阅 `/thermal/sources` 作为唯一身份来源，按同一 ID 更新位置高斯、强度与尺度；不再独立建标签、关联新生目标、确认、剪枝或合并。存在置信度和确认状态来自登记层，Bernoulli 卷积仅描述已登记假设的源数，不推断未发现目标，也不是搜完概率。A 级保留新鲜地图的强度/尺度拟合，B 级保留表面观测属性更新。
+- 登记层阻止已知目标附近的重复候选，已确认 ID 不相互合并。Kalman 路线使用 `merge_radius_m`，legacy 路线保留原基线的 `duplicate_radius_m` 排斥范围；小于合并尺度的相邻真实热源仍可能难以区分。
 - 慢层独立进程，发布 `/thermal/belief` 的 health、revision、compute_ms、cardinality_pmf。失败/超预算不输出可用新估计；控制器按健康状态及时间戳拒绝过期后验。
-- online 模式将期望存在性熵降与定位信息收益用于选点，并通过保守协方差交集给快层先验校正。shadow 不影响规划或快层；off 时快层独立运行。
+- online 模式将期望存在性熵降与定位信息收益用于选点，并按相同 ID 通过保守协方差交集给快层位置校正。shadow 不影响规划或快层；off 时快层独立运行。
 - `fast` 和 `gp_ucb` 不接受慢层先验，即使慢层仍在 online 估计。`belief_mode` 是启动选项，切换模式时重新启动覆盖层。`off` 在 launch 中显式按字符串传递。
 - 新控制路径按世界坐标接近源并保持停靠距离；直达被挡时尝试已知空闲停靠点与 Nav2 绕行，无可用停靠点或导航停滞时暂缓该源并继续探索，冷却后可重试。Nav2 探索停滞有原有受扫描保护的直接控制回退。
-- 预测重访和搜完概率模块已删除，也不按预设源数或“很久没找到新源”自动结束。雷达避障间距、相机扫描、失败点冷却仍保留。
+- 控制器直接使用登记表中的已知位置，已处理集合按稳定 ID 记录；已确认但不在画面中的目标仍可作为待访问位置。候选接近仍要求新鲜观测，雷达避障间距、相机扫描、失败点冷却和慢层超时回退保留。预测重访和搜完概率模块已删除，也不按预设源数或“很久没找到新源”自动结束。
 
 ## UGV 与 Lepton/PT3
 
@@ -98,8 +98,10 @@ python3 src/thermal_robot/scripts/plot_software_validation.py \
 
 `ThermalMap` 进一步删除无人消费的 `view_sectors`、`last_view_distance_m`；保留 `view_state` 和观测年龄，继续区分未观察、被遮挡、已观察。对应的方向历史缓存和 `sector_memory_s` 配置已删除；外部消息消费者同样需要重新构建。mapper 的 `occupied_threshold` 现在实际传入可见性判断，默认仍为 65。
 
-无效控制参数 `plateau_thresh`、`peak_confirm_s`、`peak_confirm_lin_vel`、`converge_circle_radius`、`levy_post_confirm_step` 已删除。B 级慢层直接使用表面候选，不再计算随后被丢弃的高斯预测场；A 级仍保留残差候选计算。信息收益仅保留控制器调用的共享实现。详见 [冗余清理记录](../devlog/2026-09-06-redundancy-cleanup.md)。
+无效控制参数 `plateau_thresh`、`peak_confirm_s`、`peak_confirm_lin_vel`、`converge_circle_radius`、`levy_post_confirm_step` 已删除。2026-09-07 起，A/B 慢层统一接收登记表，删除慢层独立热点提取和残差新生；A 级场拟合及控制器残差探索保留。信息收益仅保留控制器调用的共享实现。详见 [冗余清理记录](../devlog/2026-09-06-redundancy-cleanup.md)。
 
-静态对照可固定场景、seed 和预算，比较 fast/dual 或 online/shadow/off；也可通过 `software_params` 改 `residual_enabled` 或 mapper 的 `visibility_enabled`。B 级物理遮挡不因关闭算法可见性而消失。`posterior_*` 假设应与 `belief_node` 参数保持一致。
+静态对照可固定场景、seed 和预算，比较 fast/dual 或 online/shadow/off；也可通过 `software_params` 改 `residual_enabled` 或 mapper 的 `visibility_enabled`。B 级物理遮挡不因关闭算法可见性而消失。`posterior_detection_probability` 和 `posterior_false_alarm_probability` 仅是规划信息收益的观测假设。
 
 当前精简与实测证据见 [精简验证记录](../devlog/2026-09-06-static-inspection-simplification.md)。[旧软件交付审计](software_completion_audit.md) 仅对应精简前版本。
+
+2026-09-07 统一登记变更见 [目标管理精简记录](../devlog/2026-09-07-static-source-registry.md)。删除 `stale_after_s`、`stale_decay_s`、`duplicate_memory_s`、`cold_evidence_decay_s` 和慢层独立生命周期参数；用户自定义覆盖文件需要同步。源身份和已处理记录目前只保存在进程内，重启会新建会话。误确认不会在本会话内自动撤销；本任务依赖确认前过滤，不提供移动/熄灭识别或长期误检撤销流程。

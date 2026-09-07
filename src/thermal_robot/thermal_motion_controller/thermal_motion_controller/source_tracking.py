@@ -1,4 +1,4 @@
-"""Lightweight thermal source candidate tracking."""
+"""Canonical registry of stationary thermal sources and temporary candidates."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from .position_filter import PositionFilter, associate
 
 STATUS_CANDIDATE = "candidate"
 STATUS_CONFIRMED = "confirmed"
-STATUS_STALE = "stale"
-STATUS_SUPPRESSED = "suppressed"
 
 
 @dataclass
@@ -37,17 +35,15 @@ class TrackedSource:
     confidence: float
     observations: int
     last_seen_s: float
-    last_update_s: float
     covariance_xx: float = 2.0
     covariance_xy: float = 0.0
     covariance_yy: float = 2.0
     status: str = STATUS_CANDIDATE
     consecutive_observations: int = 1
-    ever_confirmed: bool = False
 
 
 class SourceTrackerCore:
-    """Nearest-neighbor multi-hypothesis tracker for source-like map peaks."""
+    """Own source IDs; confirmed entries survive absence for this session."""
 
     def __init__(
         self,
@@ -61,9 +57,7 @@ class SourceTrackerCore:
         confirm_probability: float = 0.75,
         confirm_observations: int = 5,
         confirm_covariance_max: float = 0.9,
-        stale_after_s: float = 12.0,
-        stale_decay_s: float = 20.0,
-        duplicate_memory_s: float = 60.0,
+        candidate_timeout_s: float = 12.0,
         update_alpha_min: float = 0.08,
         max_detection_age_s: float = float("inf"),
         estimator_model: str = "legacy",
@@ -71,7 +65,6 @@ class SourceTrackerCore:
         measurement_variance: float = 0.15,
         association_gate_chi2: float = 9.21,
         max_tracks: int = 32,
-        cold_evidence_decay_s: float = 2.0,
     ):
         self.ambient_temp = float(ambient_temp)
         self.min_temp_rise = float(min_temp_rise)
@@ -83,9 +76,7 @@ class SourceTrackerCore:
         self.confirm_probability = float(confirm_probability)
         self.confirm_observations = int(confirm_observations)
         self.confirm_covariance_max = float(confirm_covariance_max)
-        self.stale_after_s = float(stale_after_s)
-        self.stale_decay_s = max(1e-3, float(stale_decay_s))
-        self.duplicate_memory_s = float(duplicate_memory_s)
+        self.candidate_timeout_s = float(candidate_timeout_s)
         self.update_alpha_min = max(0.0, min(0.6, float(update_alpha_min)))
         self.max_detection_age_s = float(max_detection_age_s)
         if estimator_model not in ("legacy", "kalman"):
@@ -95,9 +86,6 @@ class SourceTrackerCore:
         self.measurement_variance = float(measurement_variance)
         self.association_gate_chi2 = float(association_gate_chi2)
         self.max_tracks = int(max_tracks)
-        self.cold_evidence_decay_s = max(.1, float(cold_evidence_decay_s))
-        self._anchors = {}
-        self._cold_stamps = {}
         self.measurement_type = "field_direct"
         self._filters = {}
         self._last_filter_s = None
@@ -170,322 +158,85 @@ class SourceTrackerCore:
         return detections
 
     def update(self, detections: Sequence[SourceDetection], now_s: float) -> List[TrackedSource]:
-        if self.estimator_model == "kalman":
-            return self._update_filtered(detections, now_s)
-        updated_ids = set()
-        for det in sorted(detections, key=lambda d: d.confidence * d.strength, reverse=True):
-            track = self._nearest_track(det)
-            if track is not None and track.track_id in updated_ids:
-                continue
-            if track is None:
-                if self._near_confirmed(det, now_s):
-                    continue
-                track = self._new_track(det, now_s)
-            else:
-                self._update_track(track, det, now_s)
-            updated_ids.add(track.track_id)
-
-        for track in self._tracks.values():
-            if track.track_id in updated_ids:
-                continue
-            dt_since_seen = max(0.0, now_s - track.last_seen_s)
-            step_dt = max(0.0, now_s - track.last_update_s)
-            track.last_update_s = now_s
-            track.consecutive_observations = 0
-            if track.status != STATUS_SUPPRESSED:
-                track.existence_probability *= math.exp(-step_dt / self.stale_decay_s)
-                track.confidence *= math.exp(-step_dt / self.stale_decay_s)
-            if dt_since_seen >= self.stale_after_s and track.status != STATUS_SUPPRESSED:
-                track.status = STATUS_STALE
-
-        self._merge_close_tracks()
-        self._promote_confirmed(now_s)
-        self._suppress_duplicates(now_s)
-        return self.tracks
-
-    def update_from_map(
-        self,
-        temperature_mean: np.ndarray,
-        confidence: np.ndarray,
-        resolution: float,
-        origin_x: float,
-        origin_y: float,
-        now_s: float,
-        last_seen_age_s: Optional[np.ndarray] = None,
-    ) -> List[TrackedSource]:
-        detections = self.extract_detections(
-            temperature_mean, confidence, resolution, origin_x, origin_y, last_seen_age_s)
-        previous = self._last_filter_s
-        tracks = self.update(detections, now_s)
-        if self.estimator_model == 'kalman' and (previous is None or now_s > previous):
-            self._apply_cold_evidence(temperature_mean, confidence, last_seen_age_s,
-                                      resolution, origin_x, origin_y, now_s)
-        return tracks
-
-    def _apply_cold_evidence(self, temperature, confidence, age, resolution, ox, oy, now_s):
-        """Only newly observed cold cells contradict a source; unseen is not cold.
-
-        Require a cold observed centre and neighbours, and no hot support in
-        the footprint. This deliberately leaves occluded/unobserved tracks to
-        ordinary survival decay instead of interpreting occlusion as death.
-        """
-        if age is None:
-            return
-        temp, conf, age = map(np.asarray, (temperature, confidence, age))
-        if temp.ndim != 2 or temp.shape != conf.shape or temp.shape != age.shape:
-            return
-        for tr in self.tracks:
-            if tr.last_seen_s == now_s:
-                self._cold_stamps.pop(tr.track_id, None)
-                continue
-            x, y = int(math.floor((tr.x-ox)/resolution)), int(math.floor((tr.y-oy)/resolution))
-            if not (0 <= y < temp.shape[0] and 0 <= x < temp.shape[1]):
-                continue
-            radius = max(1, int(math.ceil(max(.35, tr.sigma)/resolution)))
-            region = np.s_[max(0,y-radius):y+radius+1, max(0,x-radius):x+radius+1]
-            fresh = (np.isfinite(temp[region]) & (conf[region] >= self.min_confidence)
-                     & (age[region] >= 0) & (age[region] <= self.max_detection_age_s))
-            centre_fresh = (np.isfinite(temp[y,x]) and conf[y,x] >= self.min_confidence
-                            and 0 <= age[y,x] <= self.max_detection_age_s)
-            cold = (centre_fresh and fresh.sum() >= 3
-                    and not np.any(fresh & (temp[region] >= self.ambient_temp+self.min_temp_rise)))
-            if not cold:
-                self._cold_stamps.pop(tr.track_id, None)
-                continue
-            stamp = now_s-float(age[y,x])
-            previous = self._cold_stamps.get(tr.track_id, stamp)
-            self._cold_stamps[tr.track_id] = max(previous, stamp)
-            # Cap gaps: a long absence followed by one frame is one observation.
-            dt = min(1., max(0., stamp-previous))
-            tr.existence_probability *= math.exp(-dt/self.cold_evidence_decay_s)
-            if tr.existence_probability < self.confirm_probability:
-                tr.status = STATUS_STALE
-                tr.consecutive_observations = 0
-
-    def _nearest_track(self, det: SourceDetection) -> Optional[TrackedSource]:
-        best = None
-        best_d = float("inf")
-        for track in self._tracks.values():
-            if track.status == STATUS_SUPPRESSED:
-                continue
-            cov = max(0.2, 0.5 * (track.covariance_xx + track.covariance_yy))
-            d = math.hypot(det.x - track.x, det.y - track.y) / math.sqrt(cov)
-            if d < best_d:
-                best = track
-                best_d = d
-        if best is not None and math.hypot(det.x - best.x, det.y - best.y) <= self.gate_m:
-            return best
-        return None
-
-    def _near_confirmed(self, det: SourceDetection, now_s: float) -> bool:
-        return any(
-            self._blocks_duplicate_birth(track, now_s)
-            and math.hypot(det.x - track.x, det.y - track.y) <= self.duplicate_radius_m
-            for track in self._tracks.values()
-        )
-
-    def _blocks_duplicate_birth(self, track: TrackedSource, now_s: Optional[float] = None) -> bool:
-        if track.status == STATUS_SUPPRESSED:
-            return False
-        if track.ever_confirmed:
-            if now_s is None or not math.isfinite(self.duplicate_memory_s):
-                return True
-            return max(0.0, now_s - track.last_seen_s) <= self.duplicate_memory_s
-        return track.status in (STATUS_CONFIRMED, STATUS_STALE) and track.observations >= self.confirm_observations
-
-    def _new_track(self, det: SourceDetection, now_s: float) -> TrackedSource:
-        track_id = f"src_{self._next_id}"
-        self._next_id += 1
-        prob = min(0.65, 0.3 + 0.35 * det.confidence)
-        track = TrackedSource(
-            track_id=track_id,
-            x=det.x,
-            y=det.y,
-            strength=det.strength,
-            sigma=det.sigma,
-            existence_probability=prob,
-            confidence=det.confidence,
-            observations=1,
-            last_seen_s=now_s,
-            last_update_s=now_s,
-            covariance_xx=2.0,
-            covariance_yy=2.0,
-        )
-        self._tracks[track_id] = track
-        return track
-
-    def _update_track(self, track: TrackedSource, det: SourceDetection, now_s: float) -> None:
-        n = max(1, track.observations)
-        alpha = max(self.update_alpha_min, min(0.6, 1.0 / (n + 1.0)))
-        track.x = (1.0 - alpha) * track.x + alpha * det.x
-        track.y = (1.0 - alpha) * track.y + alpha * det.y
-        track.strength = max(track.strength * 0.9, det.strength)
-        track.sigma = (1.0 - alpha) * track.sigma + alpha * det.sigma
-        track.confidence = max(track.confidence * 0.85, det.confidence)
-        track.observations += 1
-        track.consecutive_observations += 1
-        track.last_seen_s = now_s
-        track.last_update_s = now_s
-        track.existence_probability = min(
-            0.99, track.existence_probability + 0.06 + 0.10 * det.confidence
-        )
-        cov = max(0.12, 2.0 / math.sqrt(track.observations))
-        track.covariance_xx = cov
-        track.covariance_yy = cov
-        if track.status == STATUS_STALE:
-            track.status = STATUS_CONFIRMED if track.ever_confirmed else STATUS_CANDIDATE
-
-    def _merge_close_tracks(self) -> None:
-        tracks = sorted(
-            self._tracks.values(),
-            key=lambda t: (t.status == STATUS_CONFIRMED, t.existence_probability, t.observations),
-            reverse=True,
-        )
-        for i, keep in enumerate(tracks):
-            if keep.status == STATUS_SUPPRESSED:
-                continue
-            for drop in tracks[i + 1:]:
-                if drop.status == STATUS_SUPPRESSED:
-                    continue
-                if math.hypot(keep.x - drop.x, keep.y - drop.y) > self.merge_radius_m:
-                    continue
-                total_obs = max(1, keep.observations + drop.observations)
-                keep.x = (keep.x * keep.observations + drop.x * drop.observations) / total_obs
-                keep.y = (keep.y * keep.observations + drop.y * drop.observations) / total_obs
-                keep.strength = max(keep.strength, drop.strength)
-                keep.confidence = max(keep.confidence, drop.confidence)
-                keep.existence_probability = max(keep.existence_probability, drop.existence_probability)
-                keep.observations = total_obs
-                keep.consecutive_observations = max(keep.consecutive_observations, drop.consecutive_observations)
-                keep.last_seen_s = max(keep.last_seen_s, drop.last_seen_s)
-                keep.last_update_s = max(keep.last_update_s, drop.last_update_s)
-                keep.covariance_xx = min(keep.covariance_xx, drop.covariance_xx)
-                keep.covariance_yy = min(keep.covariance_yy, drop.covariance_yy)
-                keep.ever_confirmed = keep.ever_confirmed or drop.ever_confirmed
-                drop.status = STATUS_SUPPRESSED
-                drop.existence_probability = min(drop.existence_probability, 0.05)
-
-    def _promote_confirmed(self, now_s: float) -> None:
-        confirmed_positions = [
-            (t.x, t.y) for t in self._tracks.values()
-            if self._blocks_duplicate_birth(t, now_s)
-        ]
-        for track in self._tracks.values():
-            if track.status not in (STATUS_CANDIDATE, STATUS_CONFIRMED):
-                continue
-            if track.status == STATUS_CONFIRMED:
-                continue
-            near_confirmed = any(
-                math.hypot(track.x - x, track.y - y) <= self.duplicate_radius_m
-                for x, y in confirmed_positions
-            )
-            if near_confirmed:
-                continue
-            cov_ok = max(track.covariance_xx, track.covariance_yy) <= self.confirm_covariance_max
-            if (
-                track.existence_probability >= self.confirm_probability
-                and track.observations >= self.confirm_observations
-                and track.consecutive_observations >= self.confirm_observations
-                and cov_ok
-            ):
-                track.status = STATUS_CONFIRMED
-                track.ever_confirmed = True
-                confirmed_positions.append((track.x, track.y))
-
-    def _suppress_duplicates(self, now_s: float) -> None:
-        confirmed = [
-            t for t in self._tracks.values()
-            if self._blocks_duplicate_birth(t, now_s)
-        ]
-        for track in self._tracks.values():
-            if self._blocks_duplicate_birth(track, now_s):
-                continue
-            if any(
-                c.track_id != track.track_id
-                and math.hypot(track.x - c.x, track.y - c.y) <= self.duplicate_radius_m
-                for c in confirmed
-            ):
-                track.status = STATUS_SUPPRESSED
-                track.existence_probability = min(track.existence_probability, 0.05)
-
-    def _update_filtered(self, detections, now_s):
+        if not math.isfinite(now_s):
+            raise ValueError("nonfinite timestamp")
         if self._last_filter_s is not None and now_s <= self._last_filter_s:
             return self.tracks
         self._last_filter_s = float(now_s)
-        detections = [d for d in detections if np.isfinite(
-            [d.x, d.y, d.strength, d.confidence, d.sigma]).all() and d.confidence > 0]
-        live = [t for t in self.tracks if t.status != STATUS_SUPPRESSED]
+        # Only unconfirmed candidates expire. Visibility is not source identity.
+        for track in self.tracks:
+            if track.status == STATUS_CANDIDATE and now_s-track.last_seen_s > self.candidate_timeout_s:
+                self._tracks.pop(track.track_id)
+                self._filters.pop(track.track_id)
+        detections = sorted((d for d in detections if np.isfinite(
+            [d.x,d.y,d.strength,d.confidence,d.sigma]).all() and d.confidence > 0),
+            key=lambda d:d.confidence*d.strength, reverse=True)
+        live = self.tracks
         for tr in live:
             self._filters[tr.track_id].predict(now_s, self.position_noise_std)
-        def allowed(i, j):
-            tr, det = live[i], detections[j]
-            anchor = self._anchors.get(tr.track_id)
-            if anchor is None:
-                return True
-            return math.hypot(det.x-anchor[0], det.y-anchor[1]) <= self.gate_m
-        matches, unmatched = associate(
-            [self._filters[t.track_id] for t in live], detections,
-            self.measurement_variance, self.association_gate_chi2,
-            max_distance=self.gate_m, strength=[t.strength for t in live], allowed=allowed)
+        matches, unmatched = associate([self._filters[t.track_id] for t in live], detections,
+            self.measurement_variance, self.association_gate_chi2, self.gate_m,
+            [t.strength for t in live])
         updated = set()
         for i, j in matches:
             tr, det = live[i], detections[j]
-            retain_confirmation = (tr.ever_confirmed and tr.status != STATUS_CANDIDATE
-                                   and tr.existence_probability >= self.confirm_probability)
             filt = self._filters[tr.track_id]
-            filt.correct((det.x, det.y), self.measurement_variance / max(det.confidence, 0.1))
-            tr.strength = 0.7*tr.strength + 0.3*det.strength
-            tr.sigma = 0.7*tr.sigma + 0.3*det.sigma
+            if self.estimator_model == 'legacy':
+                alpha = max(self.update_alpha_min, min(.6, 1./(tr.observations+1)))
+                filt.state = (1-alpha)*filt.state + alpha*np.array([det.x,det.y])
+                filt.covariance = np.eye(2)*max(.12, 2./math.sqrt(tr.observations+1))
+            else:
+                filt.correct((det.x,det.y), self.measurement_variance/max(det.confidence,.1))
+            tr.strength = .7*tr.strength + .3*det.strength
+            tr.sigma = .7*tr.sigma + .3*det.sigma
             tr.confidence = det.confidence
-            tr.existence_probability = min(0.999, tr.existence_probability + 0.15)
+            tr.existence_probability = min(.999,tr.existence_probability+.15)
             tr.observations += 1
             tr.consecutive_observations += 1
             tr.last_seen_s = now_s
-            tr.status = STATUS_CONFIRMED if retain_confirmation else STATUS_CANDIDATE
-            self._anchors[tr.track_id] = (det.x, det.y)
             updated.add(tr.track_id)
+        radius = self.duplicate_radius_m if self.estimator_model == 'legacy' else self.merge_radius_m
         for j in sorted(unmatched):
             if len(live) >= self.max_tracks:
                 break
             det = detections[j]
-            # Suppress only duplicate peaks, not the whole neighbourhood of a
-            # historical confirmation: nearby stationary sources may be distinct.
-            if any(np.hypot(det.x-self._filters[t.track_id].state[0],
-                            det.y-self._filters[t.track_id].state[1]) < self.merge_radius_m*0.35
-                   for t in live if t.track_id in updated):
+            if any(np.linalg.norm(self._filters[t.track_id].state-[det.x,det.y]) <
+                   (radius if t.status == STATUS_CONFIRMED else self.merge_radius_m)
+                   for t in live):
                 continue
-            tr = self._new_track(det, now_s)
-            self._filters[tr.track_id] = PositionFilter(
-                np.array([det.x, det.y]), stamp_s=now_s)
+            key = f"src_{self._next_id}"
+            self._next_id += 1
+            tr = TrackedSource(key,det.x,det.y,det.strength,det.sigma,
+                               min(.65,.3+.35*det.confidence),det.confidence,1,now_s)
+            self._tracks[key] = tr
+            self._filters[key] = PositionFilter(np.array([det.x,det.y]),stamp_s=now_s)
             live.append(tr)
-            self._anchors[tr.track_id] = (det.x, det.y)
-            updated.add(tr.track_id)
+            updated.add(key)
         for tr in live:
             filt = self._filters[tr.track_id]
+            tr.x,tr.y = map(float,filt.state)
+            tr.covariance_xx = float(filt.covariance[0,0])
+            tr.covariance_xy = float(filt.covariance[0,1])
+            tr.covariance_yy = float(filt.covariance[1,1])
             if tr.track_id not in updated:
-                dt = max(0., now_s - tr.last_update_s)
-                tr.existence_probability *= math.exp(-dt/self.stale_decay_s)
-                tr.confidence *= math.exp(-dt/self.stale_decay_s)
                 tr.consecutive_observations = 0
-                if now_s-tr.last_seen_s >= self.stale_after_s:
-                    tr.status = STATUS_STALE
-            tr.x, tr.y = map(float, filt.state)
-            tr.covariance_xx = float(filt.covariance[0, 0])
-            tr.covariance_xy = float(filt.covariance[0, 1])
-            tr.covariance_yy = float(filt.covariance[1, 1])
-            tr.last_update_s = now_s
             if (tr.status == STATUS_CANDIDATE
-                    and tr.existence_probability >= self.confirm_probability
                     and tr.consecutive_observations >= self.confirm_observations
-                    and max(tr.covariance_xx, tr.covariance_yy) <= self.confirm_covariance_max):
-                tr.status = STATUS_CONFIRMED
-                tr.ever_confirmed = True
-            if now_s-tr.last_seen_s > self.duplicate_memory_s and tr.existence_probability < 0.05:
-                self._tracks.pop(tr.track_id, None)
-                self._filters.pop(tr.track_id, None)
-                self._anchors.pop(tr.track_id, None)
-                self._cold_stamps.pop(tr.track_id, None)
+                    and tr.existence_probability >= self.confirm_probability
+                    and max(tr.covariance_xx,tr.covariance_yy) <= self.confirm_covariance_max):
+                if any(other.status == STATUS_CONFIRMED and other.track_id != tr.track_id
+                       and math.hypot(other.x-tr.x,other.y-tr.y) < radius for other in self.tracks):
+                    self._tracks.pop(tr.track_id)
+                    self._filters.pop(tr.track_id)
+                else:
+                    tr.status = STATUS_CONFIRMED
         return self.tracks
+
+    def update_from_map(self, temperature_mean, confidence, resolution, origin_x, origin_y,
+                        now_s, last_seen_age_s=None):
+        detections = self.extract_detections(temperature_mean,confidence,resolution,
+                                             origin_x,origin_y,last_seen_age_s)
+        return self.update(detections,now_s)
 
     def _extract_components(self, temperature, confidence, resolution, ox, oy, age=None):
         temp=np.asarray(temperature,dtype=float);conf=np.asarray(confidence,dtype=float)

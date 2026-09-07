@@ -502,7 +502,6 @@ class ControllerNode(Node):
         self._sweep_active=False
         self._explore_progress=ExplorationProgress(float(g('exploration_stall_s').value),
             float(g('exploration_retry_s').value),float(g('exploration_failed_radius_m').value))
-        self._source_registry={}
         self._residual_planner_min_evidence = float(
             g('residual_planner_min_evidence').value)
         self._residual_planner_footprint_radius = float(
@@ -1185,7 +1184,7 @@ class ControllerNode(Node):
         if self._strategy_mode in ('fast','dual','gp_ucb'):
             sources=[(t['x'],t['y'],t['strength'],t.get('sigma',self._heat_sigma))
                      for t in self._tracker_sources if t['status'] == 'confirmed'
-                     and t['probability'] >= .75 and t.get('age_s',0)<self._surface_max_age]
+                     and t['probability'] >= .75]
         predicted = fr_residual.predict_field(
             m['width'], m['height'], m['resolution'],
             m['origin_x'], m['origin_y'], self._ambient_est, sources)
@@ -1345,7 +1344,8 @@ class ControllerNode(Node):
                 if not self._send_nav2_goal(gx,gy):self._pub.publish(Twist())
                 return
         latency=now-self._tracker_sources_t
-        sources=[t for t in self._tracker_sources if t.get('age_s',0)+latency<self._surface_max_age
+        sources=[t for t in self._tracker_sources if (t['status']=='confirmed'
+                 or t.get('age_s',0)+latency<self._surface_max_age)
                  and t['probability']>.5 and t['id'] not in self._surface_seen_ids
                  and now>=self._surface_deferred.get(t['id'],-float('inf'))]
         if sources:
@@ -1432,12 +1432,8 @@ class ControllerNode(Node):
         self._tracker_sources = sources
         self._tracker_sources_t = now
         if self._strategy_mode in ('fast','dual','gp_ucb'):
-            for src in sources:
-                if src['status'] == 'confirmed' and src['probability'] >= .75:
-                    self._source_registry[src['id']]=(src['x'],src['y'],self._ambient_est+src['strength'])
-            self._found_sources=[self._source_registry[src['id']] for src in sources
-                if src['id'] in self._source_registry and src['status'] == 'confirmed'
-                and src['probability'] >= .75 and src.get('age_s',0)<self._surface_max_age]
+            self._found_sources=[(src['x'],src['y'],self._ambient_est+src['strength'])
+                                 for src in sources if src['status']=='confirmed']
 
     # ────────────────────────────────────────────────────────────────────────
     # Adaptive thresholds (unchanged)

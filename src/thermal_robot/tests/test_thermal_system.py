@@ -429,15 +429,12 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertEqual(len(confirmed), 1)
         self.assertGreaterEqual(confirmed[0].existence_probability, 0.75)
 
-    def test_T_PY12_tracker_stale_decay(self):
-        """T-PY12: source 无观测后概率衰减并进入 stale."""
-        tracker = SourceTrackerCore(confirm_observations=5, stale_after_s=2.0, stale_decay_s=2.0)
-        tracker.update([SourceDetection(0.0, 0.0, 12.0, 0.8)], now_s=0.0)
-        p0 = tracker.tracks[0].existence_probability
-        tracker.update([], now_s=4.0)
-        track = tracker.tracks[0]
-        self.assertEqual(track.status, 'stale')
-        self.assertLess(track.existence_probability, p0)
+    def test_T_PY12_unconfirmed_candidate_expires(self):
+        """Unsupported candidates are temporary; confirmed sources are registered."""
+        tracker = SourceTrackerCore(candidate_timeout_s=2.)
+        tracker.update([SourceDetection(0.,0.,12.,.8)],0.)
+        tracker.update([],4.)
+        self.assertEqual(tracker.tracks, [])
 
     def test_T_PY13_information_gain_prefers_candidate_verification(self):
         """T-PY13: 信息增益 planner 会优先选 candidate source 周边验证点."""
@@ -489,17 +486,15 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
             confirm_observations=5,
             confirm_covariance_max=1.0,
             duplicate_radius_m=2.5,
-            stale_after_s=2.0,
-            stale_decay_s=2.0,
         )
         for i in range(6):
             tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
         tracker.update([], now_s=10.0)
-        self.assertEqual(tracker.tracks[0].status, 'stale')
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
         for i in range(11, 17):
             tracker.update([SourceDetection(x=1.5, y=0.0, strength=16.0, confidence=0.9)], now_s=float(i))
         confirmed = [t for t in tracker.tracks if t.status == 'confirmed']
-        self.assertEqual(len(confirmed), 0)
+        self.assertEqual(len(confirmed), 1)
         self.assertEqual(len(tracker.tracks), 1)
 
     def test_T_PY15b_stale_confirmed_source_reacquires_same_track(self):
@@ -508,45 +503,38 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
             confirm_observations=5,
             confirm_covariance_max=1.0,
             duplicate_radius_m=2.5,
-            stale_after_s=2.0,
-            stale_decay_s=2.0,
         )
         for i in range(6):
             tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
         track_id = tracker.tracks[0].track_id
         self.assertEqual(tracker.tracks[0].status, 'confirmed')
-        self.assertTrue(tracker.tracks[0].ever_confirmed)
 
         tracker.update([], now_s=10.0)
-        self.assertEqual(tracker.tracks[0].status, 'stale')
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
         tracker.update([SourceDetection(x=0.15, y=0.1, strength=17.0, confidence=0.9)], now_s=11.0)
 
         self.assertEqual(len(tracker.tracks), 1)
         self.assertEqual(tracker.tracks[0].track_id, track_id)
         self.assertEqual(tracker.tracks[0].status, 'confirmed')
-        self.assertTrue(tracker.tracks[0].ever_confirmed)
 
-    def test_T_PY15c_expired_duplicate_memory_allows_new_birth(self):
+    def test_T_PY15c_registered_memory_does_not_expire(self):
         """T-PY15c: 去重记忆过期后，旧源附近可重新出生候选源."""
         tracker = SourceTrackerCore(
             confirm_observations=5,
             confirm_covariance_max=1.0,
             duplicate_radius_m=2.5,
-            duplicate_memory_s=5.0,
             gate_m=0.4,
-            stale_after_s=2.0,
-            stale_decay_s=20.0,
         )
         for i in range(6):
             tracker.update([SourceDetection(x=0.0, y=0.0, strength=18.0, confidence=0.9)], now_s=float(i))
         tracker.update([], now_s=20.0)
-        self.assertEqual(tracker.tracks[0].status, 'stale')
+        self.assertEqual(tracker.tracks[0].status, 'confirmed')
 
         tracker.update([SourceDetection(x=1.5, y=0.0, strength=16.0, confidence=0.9)], now_s=21.0)
 
         active = [t for t in tracker.tracks if t.status != 'suppressed']
-        self.assertEqual(len(active), 2)
-        self.assertTrue(any(t.status == 'candidate' and abs(t.x - 1.5) < 0.1 for t in active))
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].track_id, "src_1")
 
     def test_T_PY16_tracker_counts_one_observation_per_map_update(self):
         """T-PY16: 同一张热图的相邻峰不能把一个 track 瞬间刷到 confirmed."""
@@ -563,8 +551,8 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertEqual(tracker.tracks[0].status, 'confirmed')
 
 
-    def test_T_PY18_tracker_ignores_stale_map_hotspots_for_dynamic_sources(self):
-        """T-PY18: 动态场景不能从过期热图峰继续生成当前源检测."""
+    def test_T_PY18_tracker_ignores_stale_map_hotspots(self):
+        """T-PY18: 不能从过期热图峰伪造当前观测."""
         temp = np.full((12, 12), 22.0, dtype=np.float32)
         conf = np.full((12, 12), 0.9, dtype=np.float32)
         age = np.full((12, 12), 30.0, dtype=np.float32)
@@ -742,7 +730,7 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertIn('source_set_outward_bonus', params_text)
         self.assertIn('source_set_lateral_bonus', params_text)
         self.assertIn('source_set_lateral_max_d:        12.0', params_text)
-        self.assertIn('duplicate_memory_s:       60.0', params_text)
+        self.assertIn('candidate_timeout_s:      12.0', params_text)
         self.assertIn('_source_pair_lateral_yaws', selector_text)
         self.assertIn('_single_source_expansion_target', selector_text)
         self.assertIn('_single_source_sweep_idx', selector_text)

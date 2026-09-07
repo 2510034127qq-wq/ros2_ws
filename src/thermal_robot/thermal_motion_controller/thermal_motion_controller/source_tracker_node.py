@@ -26,9 +26,7 @@ class SourceTrackerNode(Node):
         self.declare_parameter('confirm_probability', 0.75)
         self.declare_parameter('confirm_observations', 5)
         self.declare_parameter('confirm_covariance_max', 0.9)
-        self.declare_parameter('stale_after_s', 12.0)
-        self.declare_parameter('stale_decay_s', 20.0)
-        self.declare_parameter('duplicate_memory_s', 60.0)
+        self.declare_parameter('candidate_timeout_s', 12.0)
         self.declare_parameter('update_alpha_min', 0.08)
         self.declare_parameter('max_detection_age_s', 8.0)
 
@@ -44,16 +42,13 @@ class SourceTrackerNode(Node):
             confirm_probability=float(g('confirm_probability').value),
             confirm_observations=int(g('confirm_observations').value),
             confirm_covariance_max=float(g('confirm_covariance_max').value),
-            stale_after_s=float(g('stale_after_s').value),
-            stale_decay_s=float(g('stale_decay_s').value),
-            duplicate_memory_s=float(g('duplicate_memory_s').value),
+            candidate_timeout_s=float(g('candidate_timeout_s').value),
             update_alpha_min=float(g('update_alpha_min').value),
             max_detection_age_s=float(g('max_detection_age_s').value),
         )
         for name, default in [('estimator_model', 'legacy'), ('update_rate', 2.0),
                               ('position_noise_std', .05), ('measurement_variance', .15),
                               ('association_gate_chi2', 9.21), ('max_tracks', 32),
-                              ('cold_evidence_decay_s', 2.),
                               ('slow_prior_enabled', True),('strategy','fast'),('slow_timeout_s',3.)]:
             self.declare_parameter(name, default)
         self._tracker.estimator_model = str(g('estimator_model').value)
@@ -61,7 +56,6 @@ class SourceTrackerNode(Node):
         self._tracker.measurement_variance = float(g('measurement_variance').value)
         self._tracker.association_gate_chi2 = float(g('association_gate_chi2').value)
         self._tracker.max_tracks = int(g('max_tracks').value)
-        self._tracker.cold_evidence_decay_s = float(g('cold_evidence_decay_s').value)
         self._update_period = 1.0 / float(g('update_rate').value)
         self._last_update = -float('inf')
         self._slow_prior_enabled = bool(g('slow_prior_enabled').value)
@@ -140,19 +134,14 @@ class SourceTrackerNode(Node):
         self._last_prior_revision = msg.revision
         # Conservative covariance intersection: slow evidence shares observations
         # with fast tracks and must not be counted as independent measurements.
-        used = set()
+        tracks = {t.track_id:t for t in self._tracker.tracks}
         for src in msg.sources:
-            if src.existence_probability < .9:
-                continue
-            choices = [(np.hypot(t.x-src.position.x,t.y-src.position.y),t)
-                       for t in self._tracker.tracks if t.track_id not in used
-                       and t.status == 'confirmed'
-                       and t.existence_probability >= self._tracker.confirm_probability
-                       and self._last_update-t.last_seen_s <= self._tracker.max_detection_age_s]
-            if not choices:
-                break
-            distance, track = min(choices,key=lambda pair:pair[0])
-            if distance > self._tracker.gate_m:
+            track = tracks.get(src.id)
+            if (track is None or track.status != 'confirmed' or src.status != 'confirmed'
+                    or self._last_update-track.last_seen_s > self._tracker.max_detection_age_s
+                    or not np.isfinite([src.position.x,src.position.y,
+                                        src.covariance_xx,src.covariance_yy]).all()
+                    or np.hypot(track.x-src.position.x,track.y-src.position.y) > self._tracker.gate_m):
                 continue
             f = self._tracker._filters.get(track.track_id)
             if f is None:
@@ -163,7 +152,6 @@ class SourceTrackerNode(Node):
             prior=np.array([src.position.x,src.position.y])
             f.state=cov@(.9*ia@f.state+.1*ib@prior)
             f.covariance=cov
-            used.add(track.track_id)
 
     def _log_status(self, tracks, now_s: float):
         confirmed = {t.track_id for t in tracks if t.status == 'confirmed'}
@@ -177,7 +165,7 @@ class SourceTrackerNode(Node):
         if now_s - self._last_log_s < 5.0:
             return
         self._last_log_s = now_s
-        visible = [t for t in tracks if t.status in ('candidate', 'confirmed', 'stale')]
+        visible = tracks
         summary = ', '.join(
             f'{t.track_id}:{t.status[0]} p={t.existence_probability:.2f} '
             f'@({t.x:.1f},{t.y:.1f})'

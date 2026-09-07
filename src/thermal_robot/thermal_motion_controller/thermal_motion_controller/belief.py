@@ -1,9 +1,7 @@
-"""Bounded labelled multi-Bernoulli source clusters (Rao-Blackwell branch).
+"""Slow Gaussian attribute estimates on the canonical source registry.
 
-Positions are conditional Gaussians, existence is Bernoulli, and the
-cardinality PMF is their exact convolution under the cluster independence
-approximation. Association is a gated maximum-score approximation, not an
-exact multi-object posterior. No ground truth or ROS types enter this module.
+Source IDs, confirmation and candidate removal belong to SourceTrackerCore.
+The cardinality PMF describes registered hypotheses, not unseen source count.
 """
 from dataclasses import dataclass
 import copy
@@ -11,25 +9,13 @@ import math
 import time
 import numpy as np
 
-from .position_filter import PositionFilter, associate
+from .position_filter import PositionFilter
 
 
 @dataclass
 class BeliefParams:
-    max_sources: int = 16
     position_noise_std: float = 0.05
     measurement_variance: float = 0.2
-    gate_chi2: float = 9.21
-    gate_m: float = 3.0
-    confidence_memory_s: float = 180.0
-    p_detection: float = 0.85
-    false_alarm_probability: float = 0.03
-    candidate_probability: float = 0.15
-    prune_probability: float = 0.025
-    confirm_probability: float = 0.90
-    confirm_hits: int = 3
-    merge_distance_m: float = 0.45
-    merge_hits: int = 3
     budget_ms: float = 100.0
     field_fit_radius_m: float = 3.0
     sigma_min_m: float = 0.25
@@ -79,29 +65,18 @@ class SourceBelief:
         self.params = params or BeliefParams()
         self.clusters = []
         self.stamp_s = None
-        self.next_label = 1
-        self.merge_support = {}
         self.last_ms = 0.0
         self.health = "not_started"
 
-    def update(self, detections, stamp_s, visibility=None, birth_detections=None,
-               field_snapshot=None):
-        """Transactional update: late/invalid/over-budget steps never publish.
-
-        visibility(x,y) is current sensor detection opportunity in [0,1], not
-        historical coverage. Occlusion only ages confidence; it is not a negative observation.
-        birth_detections must be unexplained positive residual detections when a
-        mapped field is supplied. Online caller can continue its independent fast
-        loop while this computation runs in a separate ROS process.
-        """
+    def update(self, registry, stamp_s, field_snapshot=None):
+        """Transactional attribute update; failed work leaves the prior unchanged."""
         start = time.perf_counter()
         if self.stamp_s is not None and stamp_s <= self.stamp_s:
             self.health = "stale_input"
             return False
         try:
             candidate = copy.deepcopy(self)
-            candidate._step(detections, float(stamp_s), visibility,
-                            birth_detections, field_snapshot)
+            candidate._step(registry, float(stamp_s), field_snapshot)
             ms = (time.perf_counter()-start)*1000
             if ms > self.params.budget_ms:
                 self.health, self.last_ms = "over_budget", ms
@@ -114,93 +89,48 @@ class SourceBelief:
             self.last_ms = (time.perf_counter()-start)*1000
             return False
 
-    def _step(self, detections, stamp, visibility, birth_detections, snapshot):
-        p = self.params
+    def _step(self, registry, stamp, snapshot):
         if not math.isfinite(stamp):
             raise ValueError("nonfinite timestamp")
-        for d in detections:
-            if not np.isfinite([d.x, d.y, d.strength, d.sigma, d.confidence]).all():
-                raise ValueError("nonfinite detection")
-        dt = 0 if self.stamp_s is None else stamp-self.stamp_s
-        for c in self.clusters:
-            c.position.predict(stamp, p.position_noise_std)
-            c.probability *= math.exp(-dt/max(p.confidence_memory_s, 1e-6))
-        matches, unmatched = associate(
-            [c.position for c in self.clusters], detections,
-            p.measurement_variance, p.gate_chi2, p.gate_m,
-            [c.amplitude for c in self.clusters])
-        matched = set()
-        for i, j in matches:
-            c, d = self.clusters[i], detections[j]
-            c.position.correct((d.x, d.y), p.measurement_variance/max(d.confidence, .1))
-            prior = c.probability
-            c.probability = prior*p.p_detection / max(
-                prior*p.p_detection+(1-prior)*p.false_alarm_probability, 1e-12)
-            c.hits += 1
-            c.last_seen_s = stamp
-            # Conditional scalar Gaussian amplitude and scale updates.
-            for name, value, variance in (("amplitude", d.strength, 1/max(d.confidence,.1)),
-                                           ("sigma", d.sigma, .25)):
-                pv = getattr(c, name+"_variance")+.02*dt
-                k = pv/(pv+variance)
-                setattr(c, name, max(.01, getattr(c,name)+k*(value-getattr(c,name))))
-                setattr(c, name+"_variance", (1-k)*pv)
-            matched.add(i)
-        for i, c in enumerate(self.clusters):
-            if i not in matched:
-                opportunity = 0.0 if visibility is None else float(visibility(*c.position.state[:2]))
-                pd = p.p_detection*np.clip(opportunity, 0, 1)
-                c.probability = c.probability*(1-pd)/max(1-c.probability*pd,1e-12)
-        births = detections if birth_detections is None else birth_detections
-        for j in sorted(unmatched):
-            d = detections[j]
-            if len(self.clusters) >= p.max_sources:
-                break
-            if not any(math.hypot(d.x-b.x,d.y-b.y) < p.merge_distance_m for b in births):
-                continue
-            nearby = [c for c in self.clusters if np.linalg.norm(c.position.state[:2]-[d.x,d.y])
-                      < p.merge_distance_m]
-            if nearby:
-                continue
-            c = SourceCluster(f"belief_{self.next_label}",
-                PositionFilter(np.array([d.x,d.y]), stamp_s=stamp),
-                p.candidate_probability, d.strength, d.sigma, stamp)
-            self.next_label += 1
-            self.clusters.append(c)
-        for c in self.clusters:
-            if c.hits >= p.confirm_hits and c.probability >= p.confirm_probability:
-                c.confirmed = True
-        self._merge()
-        self.clusters = [c for c in self.clusters if c.probability >= p.prune_probability]
-        if snapshot is not None:
+        previous = {c.label:c for c in self.clusters}
+        clusters, labels = [], set()
+        changed = False
+        for tr in registry:
+            if (not tr.track_id or tr.track_id in labels or tr.status not in ('candidate','confirmed')
+                    or not np.isfinite([tr.x,tr.y,tr.strength,tr.sigma,tr.confidence,
+                        tr.existence_probability,tr.last_seen_s]).all()):
+                raise ValueError("invalid canonical source")
+            labels.add(tr.track_id)
+            covariance = np.array([[tr.covariance_xx,tr.covariance_xy],
+                                   [tr.covariance_xy,tr.covariance_yy]])
+            if not np.isfinite(covariance).all() or np.linalg.eigvalsh(covariance).min() <= 0:
+                raise ValueError("invalid source covariance")
+            c = previous.get(tr.track_id)
+            if c is None:
+                c = SourceCluster(tr.track_id,PositionFilter(np.array([tr.x,tr.y]),covariance,stamp),
+                    tr.existence_probability,tr.strength,tr.sigma,tr.last_seen_s,hits=tr.observations)
+                changed = True
+            else:
+                c.position.predict(stamp,self.params.position_noise_std)
+                if tr.observations > c.hits:
+                    c.position.correct((tr.x,tr.y),max(self.params.measurement_variance,
+                                                      float(np.trace(covariance)/2)))
+                    dt = max(0.,tr.last_seen_s-c.last_seen_s)
+                    for name,value,variance in (("amplitude",tr.strength,1/max(tr.confidence,.1)),
+                                               ("sigma",tr.sigma,.25)):
+                        pv = getattr(c,name+"_variance")+.02*dt
+                        k = pv/(pv+variance)
+                        setattr(c,name,max(.01,getattr(c,name)+k*(value-getattr(c,name))))
+                        setattr(c,name+"_variance",(1-k)*pv)
+                    changed = True
+            c.probability = tr.existence_probability
+            c.confirmed = tr.status == 'confirmed'
+            c.hits,c.last_seen_s = tr.observations,tr.last_seen_s
+            clusters.append(c)
+        self.clusters = clusters
+        if changed and snapshot is not None:
             self._fit_field(snapshot)
         self.stamp_s = stamp
-
-    def _merge(self):
-        p = self.params
-        remove, active = set(), set()
-        for i, a in enumerate(self.clusters):
-            for j, b in enumerate(self.clusters[i+1:], i+1):
-                key = (a.label,b.label)
-                if (i in remove or j in remove or (a.confirmed and b.confirmed)
-                    or np.linalg.norm(a.position.state[:2]-b.position.state[:2]) > p.merge_distance_m):
-                    continue
-                active.add(key)
-                self.merge_support[key] = self.merge_support.get(key,0)+1
-                if self.merge_support[key] < p.merge_hits:
-                    continue
-                # Covariance intersection is conservative for correlated tracks.
-                ia, ib = np.linalg.inv(a.position.covariance), np.linalg.inv(b.position.covariance)
-                cov = np.linalg.inv(.5*ia+.5*ib)
-                a.position.state = cov @ (.5*ia@a.position.state+.5*ib@b.position.state)
-                a.position.covariance = cov
-                a.probability = max(a.probability,b.probability)
-                a.amplitude = max(a.amplitude,b.amplitude)
-                a.hits = max(a.hits,b.hits)
-                a.confirmed |= b.confirmed
-                remove.add(j)
-        self.merge_support = {k:v for k,v in self.merge_support.items() if k in active}
-        self.clusters = [c for i,c in enumerate(self.clusters) if i not in remove]
 
     def _fit_field(self, m):
         # Only the A-level observation has a Gaussian-field likelihood. Surface
@@ -212,7 +142,8 @@ class SourceBelief:
         z=np.asarray(m['temperature_mean'])-m.get('ambient',22.)
         valid=(np.asarray(m['confidence'])>.1)&np.isfinite(z)
         if 'last_seen_age_s' in m:
-            valid &= np.asarray(m['last_seen_age_s']) <= 2.0
+            age = np.asarray(m['last_seen_age_s'])
+            valid &= (age >= 0) & (age <= 2.0)
         for c in self.clusters:
             r2=(x-c.position.state[0])**2+(y-c.position.state[1])**2
             mask=valid&(r2<self.params.field_fit_radius_m**2)
