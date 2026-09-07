@@ -22,7 +22,7 @@ v3 新增（相比 v2）：
   ~/ros2_ws/bags/collected/<YYYYMMDD_HHMMSS>/
 
 收集内容（v3）：
-  trajectory.csv       — 机器人位姿 (odom 坐标系，含 spawn 偏移)
+  trajectory.csv       — 机器人位姿 (Gazebo 世界坐标，与 /odom 一致)
   slam_trajectory.csv  — 机器人位姿 (map 坐标系，SLAM 修正) [v3新增]
   thermal_stats.csv    — raw/filtered 图像统计（每帧）
   field_stats.csv      — 热场重构统计 + 热点
@@ -262,9 +262,9 @@ class DataCollector(Node):
         yaw = math.atan2(siny, cosy)
         vx  = msg.twist.twist.linear.x
         wz  = msg.twist.twist.angular.z
-        # 世界坐标（加 spawn 偏移，与 sensor_node 一致）
-        wx  = SPAWN_X + x
-        wy  = SPAWN_Y + y
+        # 仿真 /odom 已是 Gazebo 世界坐标，不能再次添加出生点。
+        wx  = x
+        wy  = y
         self._traj.append({'t': t, 'x': x, 'y': y, 'wx': wx, 'wy': wy,
                            'yaw': yaw, 'vx': vx, 'wz': wz})
 

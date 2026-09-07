@@ -287,7 +287,9 @@ def generate_launch_description():
                 package='thermal_field_reconstructor',
                 executable='thermal_mapper_node',
                 name='thermal_mapper_node',
-                parameters=[params_file,software_params,shared,{'fusion_memory_s':fusion_memory}],
+                # Gazebo world odometry already includes the spawn position.
+                parameters=[params_file,software_params,shared,{'fusion_memory_s':fusion_memory,
+                    'pose_source':'odom','spawn_x':0.0,'spawn_y':0.0}],
                 output='both',
             ),
             Node(
@@ -321,6 +323,8 @@ def generate_launch_description():
                     'use_sim_time': use_sim_t,
                     'random_seed': ParameterValue(run_seed, value_type=int),
                     'strategy': strategy,
+                    'thermal_pose_source': 'odom',
+                    'spawn_x': 0.0, 'spawn_y': 0.0,
                 }],
                 output='both',
             ),

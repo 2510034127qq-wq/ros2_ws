@@ -116,7 +116,7 @@ def fig_slam_vs_odom(out_dir: Path, meta: dict):
     fig.patch.set_facecolor('#0d0d17')
     fig.suptitle(
         'SLAM Trajectory (map frame) vs Odometry Trajectory\n'
-        '(Left: Odometry cumulative drift path  |  Right: SLAM-corrected path)',
+        '(Left: Recorded world path  |  Right: SLAM map-frame path)',
         color='#e0e0e0', fontsize=11)
 
     for ax in axes:
@@ -127,7 +127,7 @@ def fig_slam_vs_odom(out_dir: Path, meta: dict):
         ax.scatter(SPAWN_X, SPAWN_Y, s=80, marker='^', color='#00ff88',
                    zorder=7, label='Spawn')
 
-    # Left: Odom path (spawn + odom → world coords)
+    # Left: recorded world coordinates (simulation /odom is already absolute).
     ax0 = axes[0]
     if traj and 'wx' in traj:
         wx, wy = traj['wx'], traj['wy']
@@ -136,7 +136,7 @@ def fig_slam_vs_odom(out_dir: Path, meta: dict):
         fig.colorbar(sc, ax=ax0, label='Time (s)', shrink=0.7)
         ax0.scatter(wx[0],  wy[0],  s=60, marker='^', color='#00ff88', zorder=8)
         ax0.scatter(wx[-1], wy[-1], s=60, marker='s', color='#ff6688', zorder=8)
-    ax0.set_title('Odometry Path (spawn+odom, cumulative drift)', color='#e0e0e0')
+    ax0.set_title('Odometry Path (world coordinates)', color='#e0e0e0')
     ax0.set_xlabel('World X (m)'); ax0.set_ylabel('World Y (m)')
     ax0.legend(fontsize=7, loc='upper left')
 

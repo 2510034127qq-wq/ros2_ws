@@ -281,8 +281,9 @@ def odom_to_world(traj: List[Dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
     if not traj:
         return np.array([]), np.array([]), np.array([]), np.array([])
     ts  = np.array([r['t'] for r in traj])
-    xs  = np.array([SPAWN_X + r['x'] for r in traj])
-    ys  = np.array([SPAWN_Y + r['y'] for r in traj])
+    # Prefer recorded world coordinates; retain the old CSV fallback.
+    xs  = np.array([r.get('wx', SPAWN_X + r['x']) for r in traj])
+    ys  = np.array([r.get('wy', SPAWN_Y + r['y']) for r in traj])
     yaw = np.array([r['yaw'] for r in traj])
     return ts, xs, ys, yaw
 

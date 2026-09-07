@@ -34,6 +34,8 @@ After upgrading from the older implementation, use a clean build/install for the
 
 ## Simulation
 
+Simulation `/odom` uses the absolute Gazebo world pose (`odometry_source=1`). The main launch therefore sets mapper/controller coordinate offsets to zero; the simulated thermal sensor converts this pose to its internal spawn-relative displacement. This provides consistent thermal, lidar and navigation geometry, but does not test encoder drift or real-device localization accuracy.
+
 ```bash
 ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=true use_gzclient:=true
 

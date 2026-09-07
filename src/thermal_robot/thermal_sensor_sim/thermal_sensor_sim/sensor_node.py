@@ -134,8 +134,10 @@ class SensorNode(Node):
             f'| run_seed={scenario_seed}')
 
     def _odom_cb(self, msg: Odometry):
-        self._odom_x = msg.pose.pose.position.x
-        self._odom_y = msg.pose.pose.position.y
+        # The simulator publishes absolute Gazebo world odometry. Keep the
+        # renderer's spawn-relative displacement without adding spawn twice.
+        self._odom_x = msg.pose.pose.position.x - self._spawn_x
+        self._odom_y = msg.pose.pose.position.y - self._spawn_y
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)

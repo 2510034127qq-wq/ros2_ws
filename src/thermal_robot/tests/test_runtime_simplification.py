@@ -26,6 +26,73 @@ def method(package, module, name, **scope):
     return scope[name]
 
 
+@pytest.mark.parametrize('spawn,world', [((-6., 0.), (-4., 2.)), ((3., -2.), (4., -1.))])
+def test_simulated_image_pose_matches_absolute_gazebo_odometry(spawn, world):
+    import xml.etree.ElementTree as ET
+    robot = ET.parse(ROOT / 'g1_description/urdf/g1_nav.urdf')
+    assert robot.find('.//plugin[@name="diff_drive_controller"]/odometry_source').text == '1'
+    callback = method('thermal_sensor_sim', 'sensor_node', '_odom_cb', math=math)
+    node = NS(_spawn_x=spawn[0], _spawn_y=spawn[1])
+    callback(node, NS(pose=NS(pose=NS(position=NS(x=world[0], y=world[1]),
+        orientation=NS(w=math.cos(.3), z=math.sin(.3), x=0., y=0.)))))
+    assert (node._spawn_x+node._odom_x, node._spawn_y+node._odom_y) == world
+    assert node._odom_yaw == pytest.approx(.6)
+
+
+@pytest.mark.parametrize('approaching', [True, False])
+def test_surface_navigation_keeps_nav2_control_during_initial_turn(approaching):
+    from thermal_motion_controller.runtime_policy import exploration_goal_due
+    callback = method('thermal_motion_controller', 'controller_node', '_surface_timer',
+        math=math, NAV2_DONE='done', STATE_COARSE_SURVEY='survey',
+        exploration_goal_due=exploration_goal_due)
+    sent = []
+    node = NS(_sensor_model='a', _wx=0., _wy=0., _nav2_state='active',
+        _surface_nav_goal=('src_1', 3., 0., 0.) if approaching else None,
+        _surface_approach_timeout=20., _tracker_sources_t=5., _tracker_sources=[],
+        _surface_wp=(3., 0.), _surface_plan_t=0., _explore_arrival=.6, _explore_timeout=45.,
+        _explore_progress=NS(stalled=lambda *args:False),
+        _send_nav2_goal=lambda x,y:sent.append((x,y)) or True,
+        _nav2_progress_stalled=lambda *args:pytest.fail('Premature distance-only cancellation'),
+        _pub=NS(publish=lambda cmd:pytest.fail('Direct control must not interrupt Nav2')))
+    callback(node, 5.)  # 4-second legacy watchdog would cancel a normal heading turn.
+    assert sent == [(3., 0.)]
+
+
+def test_rpp_goal_tolerance_does_not_force_heading_only_control():
+    import yaml
+    config = yaml.safe_load((ROOT / 'thermal_bringup/config/nav2_params.yaml').read_text())
+    controller = config['controller_server']['ros__parameters']
+    tolerance = controller['general_goal_checker']['xy_goal_tolerance']
+    pursuit = controller['FollowPath']
+    # Humble RPP compares carrot distance with this goal tolerance. A larger
+    # tolerance forces zero linear velocity even when the real goal is far away.
+    assert 0. < tolerance < min(pursuit['min_lookahead_dist'], pursuit['lookahead_dist'])
+    assert config['planner_server']['ros__parameters']['GridBased']['tolerance'] <= tolerance
+
+
+def test_recorded_and_plotted_simulation_trajectory_preserves_world_position():
+    scope = dict(math=math, np=np, SPAWN_X=-6., SPAWN_Y=0.)
+    for filename, name in [('collect_sim_data.py', '_odom_cb'),
+                           ('plot_all_figures.py', 'odom_to_world')]:
+        path = ROOT / 'scripts' / filename
+        function = next(n for n in ast.walk(ast.parse(path.read_text()))
+                        if isinstance(n, ast.FunctionDef) and n.name == name)
+        function.returns = None
+        for arg in function.args.args:
+            arg.annotation = None
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), 'exec'), scope)
+    node = NS(_ts=lambda:1., _record_rate=lambda *args:None, _traj=[])
+    message = NS(pose=NS(pose=NS(position=NS(x=-4., y=2.),
+        orientation=NS(w=1., x=0., y=0., z=0.))),
+        twist=NS(twist=NS(linear=NS(x=.2), angular=NS(z=0.))))
+    scope['_odom_cb'](node, message)
+    _, x, y, _ = scope['odom_to_world'](node._traj)
+    np.testing.assert_array_equal([x[0], y[0]], [-4., 2.])
+    # Historical CSVs without explicit world columns remain readable.
+    _, x, y, _ = scope['odom_to_world']([dict(t=1., x=2., y=2., yaw=0.)])
+    np.testing.assert_array_equal([x[0], y[0]], [-4., 2.])
+
+
 def test_controller_information_gain_matches_analytic_localization_and_falls_back():
     callback = method('thermal_motion_controller', 'controller_node', '_posterior_gain',
                       np=np, source_information_gain=source_information_gain)

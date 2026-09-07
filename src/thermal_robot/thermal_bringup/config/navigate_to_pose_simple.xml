@@ -10,7 +10,7 @@
     - 完全不依赖 RateController（该节点在部分 Humble 安装中缺失）
     - 保留路径规划 + 路径跟随 + 基础恢复行为（清地图/等待）
     - 同时作为 navigate_to_pose 和 navigate_through_poses 的默认 BT
-    - 适合热导航场景：目标精度要求低（xy_tol=1.5m），简单可靠优先
+    - 导航容差须小于 RPP 前视距离；热源安全停距由上层控制
 
   功能节点（均在标准 Humble 安装中存在）：
     ComputePathToPose     — 全局 A* 路径规划

@@ -204,7 +204,8 @@
       <publish_odom_tf>true</publish_odom_tf>
       <publish_wheel_tf>false</publish_wheel_tf>
       <publish_wheel_joint_state>true</publish_wheel_joint_state>
-      <odometry_source>world</odometry_source>
+      <!-- Humble expects an integer: 0=encoder, 1=Gazebo world pose. -->
+      <odometry_source>1</odometry_source>
       <update_rate>20</update_rate>
       <legacyMode>false</legacyMode>
     </plugin>

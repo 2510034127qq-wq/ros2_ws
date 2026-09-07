@@ -1330,8 +1330,8 @@ class ControllerNode(Node):
             key,gx,gy,started=self._surface_nav_goal
             arrived=math.hypot(gx-self._wx,gy-self._wy)<.5 or self._nav2_state==NAV2_DONE
             expired=now-started>self._surface_approach_timeout
-            stalled=self._nav2_progress_stalled(gx,gy,now,'surface_approach')
-            if arrived or expired or stalled:
+            # Nav2 owns progress checking while turning or following a detour.
+            if arrived or expired:
                 self._cancel_nav2_goal();self._surface_nav_goal=None
                 if not arrived:
                     self._surface_deferred[key]=now+self._surface_retry_cooldown
@@ -1402,8 +1402,7 @@ class ControllerNode(Node):
         if self._surface_wp is None:
             self._pub.publish(self._make_cmd(0.,self._max_ang*.25));return
         tx,ty=self._surface_wp
-        stalled=self._nav2_progress_stalled(tx,ty,now,'surface_explore')
-        if not stalled and self._send_nav2_goal(tx,ty): return
+        if self._send_nav2_goal(tx,ty): return
         lin,ang=self._drive_toward_yaw(self._yaw_toward(tx,ty),self._surface_speed)
         lin,ang,_,_=self._direct_guarded_cmd(tx,ty,lin,now,'surface_explore')
         self._pub.publish(self._make_cmd(lin,ang))
