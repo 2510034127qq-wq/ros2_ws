@@ -474,14 +474,14 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         confirmed = [t for t in tracker.tracks if t.status == 'confirmed']
         active_residuals = [
             t for t in tracker.tracks
-            if math.hypot(t.x-2.4, t.y) < 0.2 and t.status != 'suppressed'
+            if math.hypot(t.x-2.4, t.y) < 0.2
         ]
         self.assertEqual(len(confirmed), 1)
         self.assertEqual(len(tracker.tracks), 1)
         self.assertEqual(active_residuals, [])
 
-    def test_T_PY15_stale_confirmed_source_blocks_duplicate_birth(self):
-        """T-PY15: confirmed 源 stale 后仍作为排斥记忆，不能重复 confirmed."""
+    def test_T_PY15_unobserved_confirmed_source_blocks_duplicate_birth(self):
+        """T-PY15: confirmed 源缺测后仍保留登记，不能重复 confirmed."""
         tracker = SourceTrackerCore(
             confirm_observations=5,
             confirm_covariance_max=1.0,
@@ -497,8 +497,8 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
         self.assertEqual(len(confirmed), 1)
         self.assertEqual(len(tracker.tracks), 1)
 
-    def test_T_PY15b_stale_confirmed_source_reacquires_same_track(self):
-        """T-PY15b: stale 的 confirmed 源再次观测时恢复同一 track."""
+    def test_T_PY15b_unobserved_confirmed_source_reacquires_same_track(self):
+        """T-PY15b: 缺测的 confirmed 源再次观测时使用同一 track."""
         tracker = SourceTrackerCore(
             confirm_observations=5,
             confirm_covariance_max=1.0,
@@ -532,7 +532,7 @@ class TestThermalFieldAlgorithms(unittest.TestCase):
 
         tracker.update([SourceDetection(x=1.5, y=0.0, strength=16.0, confidence=0.9)], now_s=21.0)
 
-        active = [t for t in tracker.tracks if t.status != 'suppressed']
+        active = tracker.tracks
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0].track_id, "src_1")
 

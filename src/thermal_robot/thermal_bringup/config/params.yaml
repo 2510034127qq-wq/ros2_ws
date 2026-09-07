@@ -34,7 +34,6 @@ preprocessor_node:
 
 reconstructor_node:
   ros__parameters:
-    reconstruction_method:  "direct_linear"
     frame_id:               "thermal_camera"
     resolution_x:           0.01
     resolution_y:           0.01
@@ -68,7 +67,6 @@ gradient_node:
   ros__parameters:
     method:             "sobel"
     subsample_stride:   4
-    frame_id:           "thermal_camera"
 
 source_tracker_node:
   ros__parameters:
@@ -98,7 +96,6 @@ controller_node:
     ambient_update_margin:   1.5
     min_gradient_mag:        0.04
     min_ascent_temp_rise:    0.5
-    peak_window_s:           4.0
     peak_temp_delta:         15.0
     rearm_cool_delta:        6.0
     known_source_radius:         2.0

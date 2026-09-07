@@ -46,21 +46,10 @@ bt_navigator:
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_follow_path_action_bt_node
-      - nav2_back_up_action_bt_node
-      - nav2_spin_action_bt_node
       - nav2_wait_action_bt_node
       - nav2_clear_costmap_service_bt_node
-      - nav2_goal_reached_condition_bt_node
-      - nav2_goal_updated_condition_bt_node
-      - nav2_reinitialize_global_localization_service_bt_node
-      - nav2_distance_traveled_condition_bt_node
-      - nav2_time_expired_condition_bt_node
       - nav2_recovery_node_bt_node
       - nav2_pipeline_sequence_bt_node
-      - nav2_round_robin_node_bt_node
-      - nav2_transform_available_condition_bt_node
-      - nav2_truncate_path_action_bt_node
-      - nav2_navigate_to_pose_action_bt_node
 
 # ── Controller Server（局部规划器）────────────────────────────────────────────
 controller_server:
@@ -129,28 +118,13 @@ planner_server:
       use_astar: true                  # A* 比 Dijkstra 在大地图上更快
       allow_unknown: true              # 允许穿越未建图区域（热搜索必须）
 
-# ── Smoother Server ───────────────────────────────────────────────────────────
-smoother_server:
-  ros__parameters:
-    use_sim_time: false
-    smoother_plugins: ["simple_smoother"]
-    simple_smoother:
-      plugin: "nav2_smoother::SimpleSmoother"
-      tolerance: 1.0e-10
-      max_its: 1000
-      do_refinement: true
-
 # ── Behavior Server（恢复行为）────────────────────────────────────────────────
 behavior_server:
   ros__parameters:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "wait"]
-    spin:
-      plugin: "nav2_behaviors/Spin"
-    backup:
-      plugin: "nav2_behaviors/BackUp"
+    behavior_plugins: ["wait"]
     wait:
       plugin: "nav2_behaviors/Wait"
     use_sim_time: false
@@ -162,34 +136,6 @@ behavior_server:
     max_rotational_vel: 0.5
     min_rotational_vel: 0.1
     rotational_acc_lim: 2.0
-
-# ── Waypoint Follower ──────────────────────────────────────────────────────────
-waypoint_follower:
-  ros__parameters:
-    use_sim_time: false
-    loop_rate: 20
-    stop_on_failure: false
-    waypoint_task_executor_plugin: "wait_at_waypoint"
-    wait_at_waypoint:
-      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
-      enabled: true
-      waypoint_pause_duration: 0
-
-# ── Velocity Smoother ──────────────────────────────────────────────────────────
-velocity_smoother:
-  ros__parameters:
-    use_sim_time: false
-    smoothing_frequency: 20.0
-    scale_velocities: false
-    feedback: "OPEN_LOOP"
-    max_velocity: [0.25, 0.0, 0.5]
-    min_velocity: [-0.10, 0.0, -0.5]   # 允许少量后退（用于恢复）
-    max_accel: [2.5, 0.0, 2.0]
-    max_decel: [-2.5, 0.0, -2.0]
-    odom_topic: "odom"
-    odom_duration: 0.1
-    deadband_velocity: [0.0, 0.0, 0.0]
-    velocity_timeout: 1.0
 
 # ── Local Costmap（局部代价地图）──────────────────────────────────────────────
 local_costmap:
@@ -266,20 +212,6 @@ global_costmap:
         cost_scaling_factor: 3.0
         inflation_radius: 0.50
       always_send_full_costmap: true
-
-# ── Map Server / Saver ────────────────────────────────────────────────────────
-map_server:
-  ros__parameters:
-    use_sim_time: false
-    yaml_filename: ""                 # 不加载预建地图（仿真中实时建图）
-
-map_saver:
-  ros__parameters:
-    use_sim_time: false
-    save_map_timeout: 5.0
-    free_thresh_default: 0.25
-    occupied_thresh_default: 0.65
-    map_subscribe_transient_local: true
 
 # ── Lifecycle Manager（Nav2生命周期管理）──────────────────────────────────────
 # 注意：这里只是参数定义。实际的 lifecycle_manager 节点在 launch 文件中启动

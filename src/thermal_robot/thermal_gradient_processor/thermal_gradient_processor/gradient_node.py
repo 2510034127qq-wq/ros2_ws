@@ -32,11 +32,9 @@ class GradientNode(Node):
         super().__init__('gradient_node')
         self.declare_parameter('method',           'sobel')
         self.declare_parameter('subsample_stride', 4)
-        self.declare_parameter('frame_id',         'thermal_camera')
 
         self._method  = self.get_parameter('method').value
         self._stride  = int(self.get_parameter('subsample_stride').value)
-        self._frame   = self.get_parameter('frame_id').value
 
         qos = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
                          history=QoSHistoryPolicy.KEEP_LAST, depth=5,

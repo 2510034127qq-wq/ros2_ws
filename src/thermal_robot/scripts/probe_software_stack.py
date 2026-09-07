@@ -24,7 +24,7 @@ class Probe(Node):
         self.max_hot=None;self.max_observed_cells=0;self.nonzero_cmd=0;self.valid_depth=0
         self.snapshots={};self.source_rows=[];self.truth=[];self.truth_rows=[];self.physical_truth=[]
         self.fresh_location_errors=[];self.inactive_confirmations=0
-        self.truth_errors=[];self.last_received={};self.start=time.monotonic()
+        self.truth_errors=[];self.last_received={}
         self.commands=[];self.yaws=[]
         self.body_errors=[];self.body_failures=[]
         self.create_subscription(ModelStates,'/thermal_scene/model_states',
@@ -66,7 +66,6 @@ class Probe(Node):
             self.snapshots['map']=temp
             self.snapshots['map_geometry']=np.array([msg.origin_x,msg.origin_y,msg.resolution])
             self.max_observed_cells=max(self.max_observed_cells,int(np.count_nonzero(msg.visit_count)))
-            self.map_type=msg.measurement_type
         elif name=='belief':
             self.health[msg.health]+=1;self.cpu.append(float(msg.compute_ms))
             self.belief_sources.update(s.id for s in msg.sources)

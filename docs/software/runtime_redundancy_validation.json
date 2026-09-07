@@ -1,0 +1,102 @@
+{
+  "base_commit": "efffa8744cc2f73dc2d74d7342c41cb8a02ae6f4",
+  "pytest_passed": 187,
+  "built_packages": [
+    "thermal_field_reconstructor",
+    "thermal_gradient_processor",
+    "thermal_motion_controller",
+    "thermal_bringup"
+  ],
+  "source_install_pairs_matched": 48,
+  "non_test_code_config": {
+    "insertions": 42,
+    "deletions": 168,
+    "net_removed": 126
+  },
+  "planner_equivalence": {
+    "seed": 20260907,
+    "maps": 200,
+    "comparisons": 600,
+    "identical": true
+  },
+  "runs": [
+    {
+      "case": "b5",
+      "directory": "bags/software_validation/20260907_redundancy_b5",
+      "duration_s": 180.0,
+      "passed": true,
+      "failures": [],
+      "found": 5,
+      "total": 5,
+      "missed": [],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.309955252810442,
+      "unmatched_rows": 0,
+      "path_m": 21.085557339210524,
+      "slow_p99_ms": 0.7965868318080901,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 98,
+        "fast_only_reports": 1,
+        "navigation_stall_fallbacks": 1,
+        "source_approach_confirmations": 2,
+        "blocked_source_deferrals": 5,
+        "source_nav2_approaches": 8,
+        "camera_sweeps_completed": 4,
+        "fast_update_ms_max": 2.286,
+        "planner_ms_max": 17.3
+      },
+      "launch_children": 17,
+      "fingerprint": "dd93ffc72e467ef1517ce42595a3cd6c12fb0f692b6640f9b1208e4cf839f48a",
+      "artifact_sha256": {
+        "run.json": "03ab64c36af81186e9d9d8aa9aed8c702a1abab3f09c9b3f755caa2de6a985fd",
+        "probe.json": "2f94e7435192ab0a8b0b934edd6de1b6b1af78bd7cd7637c728f37f637ab8b0e",
+        "sources.json": "aab3901444426ac055724fd8d4142cf66e35bf25f3eef40a52343af49c2ff690",
+        "truth.json": "4e8483649368e726890cacbd62d09ee6bb3bf5c770561fb3241d677f8690c01f",
+        "detection_metrics.json": "c8aa7999eb3b18c24f33285e9474ccf020306cf6cf10e771d85995fcb84d51e2",
+        "runtime_diagnostics.json": "42820f7da64bc6c49a59a67daa7b0b606672d2ea81c05966e30dd25bb3156aa9"
+      }
+    },
+    {
+      "case": "a2",
+      "directory": "bags/software_validation/20260907_redundancy_a2",
+      "duration_s": 60.0,
+      "passed": true,
+      "failures": [],
+      "found": 2,
+      "total": 2,
+      "missed": [],
+      "multiple_ids": {},
+      "duplicate_bins": 0,
+      "id_switches": 0,
+      "p95_m": 0.9035441512648191,
+      "unmatched_rows": 11,
+      "path_m": 12.644716352089686,
+      "slow_p99_ms": null,
+      "runtime": {
+        "crashes": [],
+        "slow_active_reports": 0,
+        "fast_only_reports": 39,
+        "navigation_stall_fallbacks": 0,
+        "source_approach_confirmations": 0,
+        "blocked_source_deferrals": 0,
+        "source_nav2_approaches": 0,
+        "camera_sweeps_completed": 0,
+        "fast_update_ms_max": 1.242,
+        "planner_ms_max": null
+      },
+      "launch_children": 17,
+      "fingerprint": "dd93ffc72e467ef1517ce42595a3cd6c12fb0f692b6640f9b1208e4cf839f48a",
+      "artifact_sha256": {
+        "run.json": "2755915f7fce8e115da832d3df8f06b31b096a8c0b78db10482c7eeb98607189",
+        "probe.json": "e91c887478aac204102efcb3e7f3e94f2fce6a2029afd14027b61f5a61c37054",
+        "sources.json": "655087aabfe3c494471f303b3caaeccd0f1e926c4d04c32e447c8fd6a5c85799",
+        "truth.json": "4b762b3ac6f79c7214361087c4abb18ce6297ab3cf4b9c7f1ea1b1c943794313",
+        "detection_metrics.json": "aac279f11ea96d06dd1fa0546fc7ec35a60f5194cc13013e882105ff738ea494",
+        "runtime_diagnostics.json": "b7a433f19539dabdabc361c1ac6ca0015320207a7fd2f692ef9d99708a0c5298"
+      }
+    }
+  ]
+}

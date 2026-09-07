@@ -85,6 +85,34 @@ def test_slow_node_publishes_canonical_identity_and_historical_age(measurement_t
     assert len(output)==1  # A cached registry frame is not another observation.
 
 
+def test_surface_belief_does_not_require_gaussian_field_arrays():
+    """Surface estimates remain usable even without A-only map payloads."""
+    from thermal_motion_controller.belief import SourceBelief, BeliefParams
+    from thermal_motion_controller.source_tracking import TrackedSource
+    callback = method('thermal_motion_controller', 'belief_node', '_tick', np=np, time=time,
+        TrackedSource=TrackedSource, BeliefState=lambda:NS(sources=[], cardinality_pmf=[]),
+        SourceEstimate=lambda:NS(position=NS(x=0., y=0.)))
+    output = []
+    node = NS(latest=NS(header=NS(stamp=NS(sec=1, nanosec=0), frame_id='world'), sources=[]),
+        latest_map=NS(measurement_type='surface_radiance'), mode='online', last_stamp=None,
+        revision=0, params=BeliefParams(budget_ms=1000),
+        belief=SourceBelief(BeliefParams(budget_ms=1000)), pub=NS(publish=output.append),
+        get_logger=lambda:NS(info=lambda text:None, error=pytest.fail))
+    callback(node)
+    assert output[-1].health == 'ready'
+
+
+@pytest.mark.parametrize('sensor,strategy', [('a','fast'), ('a','dual'), ('a','gp_ucb'), ('b','full')])
+def test_static_control_runs_without_legacy_gradient_statistics(sensor, strategy):
+    callback = method('thermal_motion_controller', 'controller_node', '_timer_cb', time=time)
+    calls = []
+    node = NS(_t0=time.monotonic(), _sensor_model=sensor, _strategy_mode=strategy,
+        _update_world_pos_from_tf=lambda:False, _surface_timer=calls.append)
+    # No gradient message/statistic helpers: modern navigation must still run.
+    callback(node)
+    assert len(calls) == 1
+
+
 def test_slow_feedback_matches_by_id_even_when_another_source_is_nearer():
     from thermal_motion_controller.position_filter import PositionFilter
     from thermal_motion_controller.runtime_policy import slow_output_usable

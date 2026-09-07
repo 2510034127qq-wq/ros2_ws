@@ -85,10 +85,6 @@ def select_information_gain_target(
 ) -> Optional[PlannerTarget]:
     if width <= 0 or height <= 0:
         return None
-    variance = _reshape(temperature_variance, height, width)
-    conf = _reshape(confidence, height, width)
-    visits = _reshape(visit_count, height, width).astype(np.float32)
-    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
 
     yy, xx = np.mgrid[0:height, 0:width]
     wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
@@ -105,20 +101,10 @@ def select_information_gain_target(
     if not np.any(valid):
         return None
 
-    var_norm = _norm_clip(variance)
-    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
-    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
-    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
-    coverage_gain = 1.0 / (1.0 + visits)
+    information_gain, coverage_gain, unseen, age_norm = _map_gains(
+        temperature_variance, confidence, visit_count, last_seen_age_s, height, width)
 
-    source_probability = np.zeros_like(dist, dtype=np.float32)
-    for src in source_estimates:
-        if src.status in ("suppressed", "stale"):
-            continue
-        spread = 1.8 if src.status == "candidate" else 1.2
-        d = np.sqrt((wx - src.x) ** 2 + (wy - src.y) ** 2)
-        amp = max(0.0, min(1.0, src.probability)) * max(0.25, min(1.0, src.confidence or src.probability))
-        source_probability = np.maximum(source_probability, amp * np.exp(-0.5 * (d / spread) ** 2))
+    source_probability = _source_probability(wx, wy, source_estimates)
 
     travel_cost = np.clip(dist / max(max_d, 1e-3), 0.0, 1.0)
     risk_penalty = np.zeros_like(dist, dtype=np.float32)
@@ -197,29 +183,15 @@ def select_coverage_ring_target(
     if max_radius < min_radius or num_angles <= 0 or num_rings <= 0:
         return None
 
-    variance = _reshape(temperature_variance, height, width)
-    conf = _reshape(confidence, height, width)
-    visits = _reshape(visit_count, height, width).astype(np.float32)
-    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
 
     yy, xx = np.mgrid[0:height, 0:width]
     wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
     wy = origin_y + (yy.astype(np.float32) + 0.5) * resolution
 
-    var_norm = _norm_clip(variance)
-    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
-    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
-    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
-    coverage_gain = 1.0 / (1.0 + visits)
+    information_gain, coverage_gain, unseen, age_norm = _map_gains(
+        temperature_variance, confidence, visit_count, last_seen_age_s, height, width)
 
-    source_probability = np.zeros((height, width), dtype=np.float32)
-    for src in source_estimates:
-        if src.status in ("suppressed", "stale"):
-            continue
-        spread = 1.8 if src.status == "candidate" else 1.2
-        d = np.sqrt((wx - src.x) ** 2 + (wy - src.y) ** 2)
-        amp = max(0.0, min(1.0, src.probability)) * max(0.25, min(1.0, src.confidence or src.probability))
-        source_probability = np.maximum(source_probability, amp * np.exp(-0.5 * (d / spread) ** 2))
+    source_probability = _source_probability(wx, wy, source_estimates)
 
     duplicate_cell = np.zeros((height, width), dtype=np.float32)
     for sx, sy in known_sources:
@@ -357,10 +329,6 @@ def select_exploration_sector_yaw(
     """
     if width <= 0 or height <= 0 or num_sectors <= 0:
         return None
-    variance = _reshape(temperature_variance, height, width)
-    conf = _reshape(confidence, height, width)
-    visits = _reshape(visit_count, height, width).astype(np.float32)
-    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
 
     yy, xx = np.mgrid[0:height, 0:width]
     wx = origin_x + (xx.astype(np.float32) + 0.5) * resolution
@@ -376,11 +344,8 @@ def select_exploration_sector_yaw(
     if not np.any(valid):
         return None
 
-    var_norm = _norm_clip(variance)
-    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
-    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
-    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
-    coverage_gain = 1.0 / (1.0 + visits)
+    information_gain, coverage_gain, unseen, age_norm = _map_gains(
+        temperature_variance, confidence, visit_count, last_seen_age_s, height, width)
     travel_cost = np.clip(dist / max(max_d, 1e-3), 0.0, 1.0)
     cell_score = 0.58 * information_gain + 0.42 * coverage_gain - 0.35 * travel_cost - 0.85 * duplicate
     angle = np.arctan2(wy - robot_wy, wx - robot_wx)
@@ -405,6 +370,31 @@ def select_exploration_sector_yaw(
         if best is None or score > best.score:
             best = PlannerSector(yaw=yaw, score=score, reason="sector_information")
     return best
+
+
+def _map_gains(temperature_variance, confidence, visit_count, last_seen_age_s, height, width):
+    """Common uncertainty and coverage terms for the static baseline planners."""
+    variance = _reshape(temperature_variance, height, width)
+    conf = _reshape(confidence, height, width)
+    visits = _reshape(visit_count, height, width).astype(np.float32)
+    age = _reshape(last_seen_age_s, height, width).astype(np.float32)
+    var_norm = _norm_clip(variance)
+    unseen = 1.0 - np.clip(conf, 0.0, 1.0)
+    age_norm = np.where(age >= 0.0, np.clip(age / 60.0, 0.0, 1.0), 1.0)
+    information_gain = 0.45 * unseen + 0.35 * var_norm + 0.20 * age_norm
+    coverage_gain = 1.0 / (1.0 + visits)
+    return information_gain, coverage_gain, unseen, age_norm
+
+
+def _source_probability(wx, wy, source_estimates):
+    source_probability = np.zeros_like(wx, dtype=np.float32)
+    for src in source_estimates:
+        spread = 1.8 if src.status == "candidate" else 1.2
+        d = np.sqrt((wx - src.x) ** 2 + (wy - src.y) ** 2)
+        amp = max(0.0, min(1.0, src.probability)) * max(0.25, min(1.0, src.confidence or src.probability))
+        source_probability = np.maximum(source_probability, amp * np.exp(-0.5 * (d / spread) ** 2))
+
+    return source_probability
 
 
 def _reshape(values: np.ndarray, height: int, width: int) -> np.ndarray:

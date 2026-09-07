@@ -264,7 +264,6 @@ class ControllerNode(Node):
         self.declare_parameter('ang_smooth_alpha',           0.55)
         self.declare_parameter('lin_smooth_alpha',           0.4)
         self.declare_parameter('min_gradient_mag',           0.15)
-        self.declare_parameter('peak_window_s',              4.0)
         self.declare_parameter('peak_temp_delta',           15.0)
         self.declare_parameter('ambient_temp',              -1.0)
         self.declare_parameter('ambient_update_margin',      1.5)
@@ -394,7 +393,6 @@ class ControllerNode(Node):
         self._alpha_ang    = float(g('ang_smooth_alpha').value)
         self._alpha_lin    = float(g('lin_smooth_alpha').value)
         self._min_gmag     = float(g('min_gradient_mag').value)
-        self._win_n        = max(4, int(float(g('peak_window_s').value)*self._rate))
         self._pk_tdelta    = float(g('peak_temp_delta').value)
         _ambient_param     = float(g('ambient_temp').value)
         self._amb_margin   = float(g('ambient_update_margin').value)
@@ -644,7 +642,6 @@ class ControllerNode(Node):
         self._thermal_map_t: float = 0.0
         self._tracker_sources: List[Dict] = []
         self._tracker_sources_t: float = 0.0
-        self._temp_win: deque = deque(maxlen=self._win_n)
         self._temp_max_seen = 25.0
         self._ang_smooth = 0.0
         self._lin_smooth = 0.0
@@ -1085,7 +1082,6 @@ class ControllerNode(Node):
                 self._ambient_est = (self._ambient_ema_alpha*T
                                      + (1.0-self._ambient_ema_alpha)*self._ambient_est)
 
-        self._temp_win.append(T)
         if T > self._temp_max_seen:
             self._temp_max_seen = T
         if self._calib_done and trise > _WARM_TEMP_DELTA:
@@ -1943,7 +1939,6 @@ class ControllerNode(Node):
         self._locked_yaw = None
         self._peak_cand_t = None
         self._temp_max_seen = self._ambient_est
-        self._temp_win.clear()
         self._search_rounds = 0
         self._esc_loop_count = 0
         self._departure_wp = self._compute_departure_wp()
@@ -2417,8 +2412,6 @@ class ControllerNode(Node):
 
     def _timer_cb(self):
         now=time.monotonic(); elapsed=now-self._t0
-        T=self._current_temp(); gm=self._grad_mag()
-        n_found=len(self._found_sources); trise=self._temp_rise()
 
         # FIX-1: Update world position from SLAM TF every tick
         tf_ok = self._update_world_pos_from_tf()
@@ -2431,6 +2424,8 @@ class ControllerNode(Node):
         if self._sensor_model!='a' or self._strategy_mode in ('fast','dual','gp_ucb'):
             self._surface_timer(now)
             return
+        T=self._current_temp(); gm=self._grad_mag()
+        n_found=len(self._found_sources); trise=self._temp_rise()
         self._update_armed(T)
 
         # ─ SAMPLE (highest priority) ──────────────────────────────────────
@@ -2452,7 +2447,7 @@ class ControllerNode(Node):
                 self._move_start = (self._wx, self._wy)
                 self._locked_yaw = self._escape_yaw()
                 self._peak_cand_t = None; self._temp_max_seen = self._ambient_est
-                self._temp_win.clear(); self._search_rounds = 0
+                self._search_rounds = 0
                 self._esc_loop_count = 0
                 self.get_logger().info(
                     f'[→RELOCATE] yaw={math.degrees(self._locked_yaw):.0f}deg '

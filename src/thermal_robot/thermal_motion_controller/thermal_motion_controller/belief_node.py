@@ -52,7 +52,7 @@ class BeliefNode(Node):
                 s.covariance_xx,s.covariance_xy,s.covariance_yy,s.status) for s in msg.sources]
             snapshot=None
             m=self.latest_map
-            if m is not None:
+            if m is not None and m.measurement_type == 'field_direct':
                 map_stamp=m.header.stamp.sec+m.header.stamp.nanosec/1e9
                 if m.header.frame_id==msg.header.frame_id and abs(stamp-map_stamp)<=self.freshness:
                     shape=(m.height,m.width)

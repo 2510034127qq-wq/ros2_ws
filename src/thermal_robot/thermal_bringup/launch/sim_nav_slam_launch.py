@@ -107,12 +107,9 @@ def generate_launch_description():
     # 注意：nav2_amcl 不需要（slam_toolbox 已提供定位）
     nav2_node_names = [
         'controller_server',
-        'smoother_server',
         'planner_server',
         'behavior_server',
         'bt_navigator',
-        'waypoint_follower',
-        'velocity_smoother',
     ]
 
     return LaunchDescription([
@@ -208,14 +205,6 @@ def generate_launch_description():
                 parameters=[nav2_params, {'use_sim_time': use_sim_t}],
                 output='screen',
             ),
-            # smoother_server：路径平滑
-            Node(
-                package='nav2_smoother',
-                executable='smoother_server',
-                name='smoother_server',
-                parameters=[nav2_params, {'use_sim_time': use_sim_t}],
-                output='screen',
-            ),
             # planner_server：全局路径规划（NavFn A*）
             Node(
                 package='nav2_planner',
@@ -242,22 +231,6 @@ def generate_launch_description():
                     'default_nav_to_pose_bt_xml': nav2_bt_xml,
                     'default_nav_through_poses_bt_xml': nav2_bt_xml,
                 }],
-                output='screen',
-            ),
-            # waypoint_follower：路径点跟随（可选）
-            Node(
-                package='nav2_waypoint_follower',
-                executable='waypoint_follower',
-                name='waypoint_follower',
-                parameters=[nav2_params, {'use_sim_time': use_sim_t}],
-                output='screen',
-            ),
-            # velocity_smoother：速度平滑（消除急动）
-            Node(
-                package='nav2_velocity_smoother',
-                executable='velocity_smoother',
-                name='velocity_smoother',
-                parameters=[nav2_params, {'use_sim_time': use_sim_t}],
                 output='screen',
             ),
             # lifecycle_manager：管理 Nav2 所有节点的生命周期
@@ -361,6 +334,7 @@ def generate_launch_description():
                 package='thermal_sensor_sim',
                 executable='colorizer_node',
                 name='colorizer_node',
+                condition=IfCondition(use_rviz),
                 parameters=[{'t_min': 22.0, 't_max': 65.0}],
                 output='both',
             ),

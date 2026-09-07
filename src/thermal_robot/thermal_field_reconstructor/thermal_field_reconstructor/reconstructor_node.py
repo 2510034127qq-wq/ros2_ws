@@ -22,7 +22,6 @@ class ReconstructorNode(Node):
     def __init__(self):
         super().__init__('reconstructor_node')
         self.declare_parameter('ambient_temp',22.0)
-        self.declare_parameter('reconstruction_method',  'direct_linear')
         self.declare_parameter('frame_id',               'thermal_camera')
         self.declare_parameter('resolution_x',           0.01)
         self.declare_parameter('resolution_y',           0.01)
@@ -32,7 +31,6 @@ class ReconstructorNode(Node):
         self.declare_parameter('hotspot_max_count',      5)
         self.declare_parameter('hotspot_min_distance',   5)
 
-        self._method   = self.get_parameter('reconstruction_method').value
         self._frame    = self.get_parameter('frame_id').value
         self._rx       = float(self.get_parameter('resolution_x').value)
         self._ry       = float(self.get_parameter('resolution_y').value)
@@ -52,7 +50,7 @@ class ReconstructorNode(Node):
         self._sub = self.create_subscription(Image, '/thermal/filtered', self._cb, sub_qos)
         self._pub = self.create_publisher(ThermalField, '/thermal/field', pub_qos)
         self._srv = self.create_service(GetFieldInfo, '/thermal/get_field_info', self._srv_cb)
-        self.get_logger().info(f'reconstructor_node | method={self._method}')
+        self.get_logger().info('reconstructor_node | method=direct_linear')
 
     def _hotspots(self, arr, mean_t):
         thr = mean_t + self._hs_dt
@@ -104,7 +102,7 @@ class ReconstructorNode(Node):
         tf.mean_temperature_celsius = t_mean
         tf.std_temperature_celsius  = t_std
         tf.hotspots = self._hotspots(arr, t_mean)
-        tf.reconstruction_method = self._method
+        tf.reconstruction_method = 'direct_linear'
         tf.source_encoding = msg.encoding
         self._last = tf
         self._pub.publish(tf)

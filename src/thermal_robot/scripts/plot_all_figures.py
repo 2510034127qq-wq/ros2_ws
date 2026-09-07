@@ -1405,12 +1405,6 @@ def plot_performance_radar(data: Dict, log_recs: List[Dict],
             preproc_gain = 1.0 - min(1.0, np.mean(filt_stds) / (np.mean(raw_stds) + 1e-9))
 
     # 归一化指标 [0-1]，越大越好
-    def safe_div(a, b, max_val=None):
-        if b <= 0: return 0.0
-        v = a / b
-        if max_val: v = min(v, max_val)
-        return float(v)
-
     metrics = {
         'Source\nDetection':  n_found / max(1, n_total_src),
         'Path\nEfficiency':   min(1.0, optimal_path / max(path_len, 0.1)),
