@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import zlib
 from dataclasses import dataclass, field
@@ -86,6 +87,20 @@ def default_config_b_sources() -> List[HeatSource]:
         HeatSource("SB_far", 6.0, -3.0, 22.0, 0.9),
         HeatSource("SC_weak", -5.0, -5.5, 16.0, 0.8),
     ]
+
+
+def set_source_temperatures(scenario, temperature_range_c, ambient_c, seed):
+    """Assign stationary surface temperatures, reproducibly per source ID."""
+    if len(temperature_range_c) != 2:
+        raise ValueError('source_temperature_range_c requires [min_c, max_c]')
+    lower, upper = map(float, temperature_range_c)
+    if not all(math.isfinite(v) for v in (lower, upper, ambient_c)):
+        raise ValueError('source temperature range and ambient temperature must be finite')
+    if lower <= ambient_c or upper < lower:
+        raise ValueError('source temperature range must satisfy ambient < min_c <= max_c')
+    for source in scenario.sources:
+        rng = random.Random(int(seed) * 1000003 + zlib.crc32(source.source_id.encode('utf-8')))
+        source.amplitude = rng.uniform(lower, upper) - ambient_c
 
 
 def default_config_b_scenario(num_sources: int = 3) -> ThermalScenario:

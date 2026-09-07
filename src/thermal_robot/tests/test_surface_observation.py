@@ -17,6 +17,43 @@ def renderer(objects):
     return SurfaceRenderer(k,objects,effects=e)
 
 
+def test_surface_temperature_range_is_reproducible_and_stationary():
+    from thermal_sensor_sim.scenario import default_config_b_scenario, set_source_temperatures
+    first, second, other = (default_config_b_scenario() for _ in range(3))
+    second.sources.reverse()
+    for scene, seed in [(first, 202), (second, 202), (other, 203)]:
+        set_source_temperatures(scene, [28., 37.], 22., seed)
+    values = lambda scene:{s.source_id: s.amplitude + 22. for s in scene.sources}
+    assert values(first) == values(second)
+    assert values(first) != values(other)
+    assert all(28. <= t <= 37. for t in values(first).values())
+    assert first.all_states(0.) == first.all_states(1000.)
+
+
+@pytest.mark.parametrize('limits', [[28.], [28., 30., 37.], [37., 28.],
+                                   [22., 37.], [float('nan'), 37.], [28., float('inf')]])
+def test_invalid_surface_temperature_range_is_rejected(limits):
+    from thermal_sensor_sim.scenario import default_config_b_scenario, set_source_temperatures
+    scene = default_config_b_scenario()
+    before = scene.all_states(0.)
+    with pytest.raises(ValueError):
+        set_source_temperatures(scene, limits, 22., 202)
+    assert scene.all_states(0.) == before
+
+
+def test_small_surface_rendering_matches_assigned_truth_temperature():
+    from thermal_sensor_sim.scenario import HeatSource, ThermalScenario, set_source_temperatures
+    from thermal_sensor_sim.surface_scene import objects_from_sources
+    scene = ThermalScenario(sources=[HeatSource('test', 4., 0., 35., 1.)])
+    set_source_temperatures(scene, [31., 31.], 22., 202)
+    objects = objects_from_sources(scene.all_states(0.), emissivity=1.)
+    assert objects[0].size == (.3, .3, .8)
+    image, depth = renderer(objects).render(SensorPose3D(0., 0., .6), 0.)
+    assert image[24, 32] == pytest.approx(31.)
+    assert image[24, 32] == pytest.approx(22. + scene.all_states(0.)[0].amplitude)
+    assert depth[24, 32] == pytest.approx(3.85)
+
+
 def test_box_depth_and_front_surface_projection():
     r=renderer([SurfaceObject('heater',(4,0,.6),(1,1,1.2),temperature=60,emissivity=1)])
     pose=SensorPose3D(0,0,.6)
@@ -97,6 +134,8 @@ def test_surface_world_contains_collision_bodies_and_state_plugin(tmp_path):
     assert 'thermal_body_T1_north' in names and 'thermal_body_T2_east' in names
     assert world.find("plugin[@name='thermal_surface_state']") is not None
     assert len(objects_from_world(output))>=2
+    size = world.find("model[@name='thermal_body_T1_north']/link/collision/geometry/box/size")
+    assert list(map(float, size.text.split())) == [.3, .3, .8]
 
 
 def test_rotated_occupancy_preserves_obstacle_and_motion_queries():

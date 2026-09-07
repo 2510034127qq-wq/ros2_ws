@@ -54,8 +54,8 @@ def prepare_thermal_world(context):
     with open(LaunchConfiguration('software_params').perform(context)) as stream:
         config=yaml.safe_load(stream).get('sensor_node',{}).get('ros__parameters',{})
     fd,path=tempfile.mkstemp(prefix='thermal_surface_',suffix='.world');os.close(fd)
-    write_surface_world(original,scenario,path,config.get('surface_height_m',1.2),
-                        config.get('surface_diameter_m',.6),config.get('surface_shape','box'))
+    write_surface_world(original,scenario,path,config.get('surface_height_m',.8),
+                        config.get('surface_diameter_m',.3),config.get('surface_shape','box'))
     def cleanup(context):
         if os.path.exists(path):os.unlink(path)
         return []

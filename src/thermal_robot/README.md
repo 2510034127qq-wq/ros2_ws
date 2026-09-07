@@ -46,6 +46,20 @@ Defaults: `sensor_model:=a`, `strategy:=dual`, `belief_mode:=online`, simulation
 
 Runtime parameters live in `thermal_bringup/config/params.yaml` and `multisource.yaml`. There is no extra task overlay. See [runtime and UGV instructions](../../docs/software/multisource_runtime.md) for parameter details.
 
+B 级默认目标宽 **0.3 m**、高 **0.8 m**，表面温度在 **28–37℃** 内按源 ID 和运行种子均匀抽取一次，之后保持恒温。环境默认为 22℃，因此默认温差为 6–15℃。更换 `run_seed` 可生成另一组温度，相同种子可复现。
+
+在 `thermal_bringup/config/multisource.yaml` 中自定义范围，例如：
+
+```yaml
+sensor_node:
+  ros__parameters:
+    source_temperature_range_c: [30.0, 40.0]
+```
+
+省略此参数时使用 `[28.0, 37.0]`；两端相同（如 `[32.0, 32.0]`）表示所有目标固定为该温度。使用浮点数，要求环境温度 < 下限 ≤ 上限，且数值有限。范围只作用于 B 级，会覆盖场景 YAML 的旧 `amplitude`；A 级继续使用场景温升。成像和 `/sim/thermal_sources_truth` 使用同一组抽取值，真值 `strength` 仍表示相对环境的温升。发射率和测温噪声可使图像读数落在设定范围外。
+
+修改源码目录中的 YAML 后重建 `thermal_bringup`；也可以复制完整的 `multisource.yaml` 修改，再用 `software_params:=/绝对路径/配置.yaml` 启动，无需重建。此次默认值调整不包含上一轮压力测试中的额外噪声、缺测或标定偏差。
+
 Default Config-B contains three fixed sources. `scenario_file` selects a different static layout; `world_file` independently selects geometry. Active scenarios include `static_two_sources.yaml`, `static_five_sources.yaml`, `static_offset_sources.yaml` and `software_contract_multisource.yaml`. Dynamic schedules or trajectories in YAML raise an error.
 
 ```bash

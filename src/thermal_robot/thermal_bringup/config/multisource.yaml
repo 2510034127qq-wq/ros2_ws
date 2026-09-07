@@ -8,8 +8,11 @@ sensor_node:
     camera_roll_rad: 0.0
     camera_offset_x_m: 0.0
     camera_offset_y_m: 0.0
-    surface_height_m: 1.2
-    surface_diameter_m: 0.6
+    surface_height_m: 0.8
+    surface_diameter_m: 0.3
+    # B only: absolute surface Celsius, drawn once per source and run seed.
+    # Overrides scenario amplitudes for B. Omit to use [28.0, 37.0].
+    source_temperature_range_c: [28.0, 37.0]
     surface_shape: box
     surface_hot_faces: [-1]
     surface_emissivity: 0.95

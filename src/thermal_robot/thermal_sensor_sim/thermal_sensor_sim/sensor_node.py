@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""
-sensor_node.py — 热传感器仿真节点 v13: Config-B通用性验证配置
-============================================================
-v13 Config-B 通用性验证配置：
-  SA_left: world=(-1,3.5)  A=35°C σ=1.1m  peak≈57°C  d_spawn=6.1m
-  SB_far:  world=(6,-3)    A=22°C σ=0.9m  peak≈44°C  d_spawn=12.4m（远距测试）
-  SC_weak: world=(-5,-5.5) A=16°C σ=0.8m  peak≈38°C  d_spawn=5.6m（弱源，margin=1°C）
+"""A-level analytic fields and B-level stationary radiometric surfaces.
 
-参数适配：sample_min_trise=8°C（SC_weak@0.75m trise=10.3°C，余量2.3°C）
-所有源间距>7m，不存在路径阻塞（excl_r=2.0m 验证通过）。
+B surface temperatures are drawn once from a configured Celsius range;
+rendering and published source truth use the same scenario state.
 """
 
 import math
@@ -27,6 +21,7 @@ from thermal_sensor_sim.scenario import (
     apply_run_seed,
     default_config_b_scenario,
     load_scenario_file,
+    set_source_temperatures,
 )
 
 
@@ -50,11 +45,12 @@ class SensorNode(Node):
         self.declare_parameter('scenario_file', '')
         self.declare_parameter('scenario_seed', 0)
         self.declare_parameter('scenario_jitter_std_m', 0.0)
+        self.declare_parameter('source_temperature_range_c', [28.0, 37.0])
 
         for name,default in [('sensor_model','a'),('world_file',''),('camera_hfov_deg',57.),
                              ('camera_height_m',.6),('camera_pitch_rad',0.),('camera_yaw_rad',0.),
                              ('camera_roll_rad',0.),('camera_offset_x_m',0.),('camera_offset_y_m',0.),
-                             ('surface_height_m',1.2),('surface_diameter_m',.6),
+                             ('surface_height_m',.8),('surface_diameter_m',.3),
                              ('surface_shape','box'),('surface_hot_faces',[-1]),
                              ('surface_emissivity',.95),('surface_far_m',15.),
                              ('surface_noise_std_c',.15),('surface_bias_c',0.),
@@ -84,6 +80,12 @@ class SensorNode(Node):
             self._scenario = default_config_b_scenario(n_src)
             self._scenario_label = 'Config-B fallback'
         apply_run_seed(self._scenario, scenario_seed, jitter_std_m=jitter_std)
+        if self._sensor_model == 'b':
+            temperature_range = self.get_parameter('source_temperature_range_c').value
+            set_source_temperatures(self._scenario, temperature_range, self._ambient, noise_seed)
+            temperatures = ', '.join(f'{s.source_id}={self._ambient+s.amplitude:.2f}C'
+                                     for s in self._scenario.sources)
+            self.get_logger().info(f'[SURFACE_TEMPERATURES] range={list(temperature_range)} {temperatures}')
         self._sources = self._scenario.sources
         self._spawn_x = self._scenario.spawn_x
         self._spawn_y = self._scenario.spawn_y

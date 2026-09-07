@@ -150,7 +150,7 @@ def objects_from_world(path,ambient_c=22.):
     return result
 
 
-def objects_from_sources(states,height=1.2,diameter=.6,emissivity=.95,shape='box',hot_faces=(),ambient_c=22.):
+def objects_from_sources(states,height=.8,diameter=.3,emissivity=.95,shape='box',hot_faces=(),ambient_c=22.):
     # Only the simulator calls this adapter. Published images/depth contain no IDs.
     objects=[]
     for state in states:
@@ -162,7 +162,7 @@ def objects_from_sources(states,height=1.2,diameter=.6,emissivity=.95,shape='box
     return objects
 
 
-def write_surface_world(world_path,scenario,output_path,height=1.2,diameter=.6,shape='box'):
+def write_surface_world(world_path,scenario,output_path,height=.8,diameter=.3,shape='box'):
     """Add real Gazebo collision bodies paired with the analytic thermal surfaces."""
     tree=ET.parse(world_path);world=tree.getroot().find('world')
     if world is None: raise ValueError('missing SDF world')
