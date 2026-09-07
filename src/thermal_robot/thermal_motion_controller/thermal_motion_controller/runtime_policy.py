@@ -72,16 +72,34 @@ def slow_output_usable(strategy, mode, health, stamp_s, now_s,
     return 0<=now_s-stamp_s<=timeout_s and 0<=receipt_age_s<=timeout_s
 
 
-def surface_approach_waypoint(robot_xy, source_xy, standoff_m, occupancy, robot_radius_m=.35):
-    """Choose a known-free standoff footprint; Nav2 owns the route around walls."""
+def surface_approach_waypoint(robot_xy, source_xy, standoff_m, occupancy,
+                              robot_radius_m=.35, max_step_m=2.):
+    """Choose a safe local step toward a source; Nav2 owns the route around walls.
+
+    Prefer a final standoff within this step. Otherwise advance through a
+    known-free footprint without requiring the distant standoff to be mapped.
+    Strict distance progress prevents cycling between intermediate waypoints.
+    """
     if occupancy is None:return None
     from thermal_field_reconstructor.visibility import known_free_at
     angles=np.linspace(0.,2*math.pi,24,endpoint=False)
-    points=np.asarray(source_xy)+standoff_m*np.column_stack((np.cos(angles),np.sin(angles)))
-    offsets=robot_radius_m*np.column_stack((np.cos(angles),np.sin(angles)))
+    directions=np.column_stack((np.cos(angles),np.sin(angles)))
+    robot,source=np.asarray(robot_xy),np.asarray(source_xy)
+    points=np.vstack((source+standoff_m*directions,
+                      robot+.5*max_step_m*directions,robot+max_step_m*directions))
+    offsets=robot_radius_m*directions
     footprint=points[:,None,:]+np.vstack((np.zeros((1,2)),offsets))[None,:,:]
     valid=known_free_at(occupancy,footprint[:,:,0],footprint[:,:,1]).all(axis=1)
+    travel=np.linalg.norm(points-robot,axis=1)
+    remaining=np.linalg.norm(points-source,axis=1)
+    valid &= ((travel>.5) & (travel<=max_step_m+1e-6)
+              & (remaining>=standoff_m-1e-6)
+              & (remaining<np.linalg.norm(robot-source)-.25))
+    if valid[:24].any():
+        choices=points[:24][valid[:24]]
+        point=choices[np.argmin(np.linalg.norm(choices-robot,axis=1))]
+        return float(point[0]),float(point[1])
     choices=points[valid]
     if not len(choices):return None
-    point=choices[np.argmin(np.linalg.norm(choices-np.asarray(robot_xy),axis=1))]
+    point=choices[np.argmin(remaining[valid]+.2*travel[valid])]
     return float(point[0]),float(point[1])

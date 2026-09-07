@@ -58,6 +58,94 @@ def test_surface_navigation_keeps_nav2_control_during_initial_turn(approaching):
     assert sent == [(3., 0.)]
 
 
+def surface_control_node(sources):
+    from thermal_motion_controller.runtime_policy import CoverageSweep
+    callback = method('thermal_motion_controller', 'controller_node', '_surface_timer',
+        math=math, NAV2_DONE='done', STATE_CONVERGE='converge', Twist=lambda:None,
+        surface_approach_waypoint=lambda *args:(2.,0.))
+    commands = []
+    node = NS(_sensor_model='b', _wx=0., _wy=0., _odom_yaw=0.,
+        _surface_nav_goal=None, _tracker_sources_t=60., _tracker_sources=sources,
+        _surface_max_age=1.5, _surface_seen_ids=set(), _surface_deferred={},
+        _surface_target_id='current', _surface_hold_start=None, _surface_hold=1.,
+        _surface_standoff=1.2, _surface_speed=.2, _sweep_active=False,
+        _surface_blocked_since=None, _surface_blocked_wait=.5,
+        _surface_robot_radius=.35, _surface_waypoint_step=2., _occ_view=None,
+        _sweep_speed=.5, _camera_sweep=CoverageSweep(), _surface_wp=None,
+        _surface_approach_timeout=20., _surface_retry_cooldown=20.,
+        _cancel_nav2_goal=lambda:None, _make_cmd=lambda lin,ang:(lin,ang),
+        _drive_toward_yaw=lambda yaw,speed:(speed,0.),
+        _direct_guarded_cmd=lambda x,y,speed,*args:(speed,0.,'known_free',True),
+        get_logger=lambda:NS(info=lambda message:None), _pub=NS(publish=commands.append))
+    node._camera_sweep.origin=(0.,0.);node._camera_sweep.completed_s=0.
+    return callback,node,commands
+
+
+def surface_source(key,x):
+    return dict(id=key,x=x,y=0.,status='confirmed',probability=.99)
+
+
+@pytest.mark.parametrize('other_x,expected', [(4.9,'current'), (2.,'new')])
+def test_surface_target_resists_jitter_but_accepts_much_closer_source(other_x,expected):
+    callback,node,commands=surface_control_node(
+        [surface_source('new',other_x),surface_source('current',5.)])
+    callback(node,60.)
+    assert node._surface_target_id==expected
+    assert commands[-1][0]>.0  # Due periodic sweep must not interrupt approach.
+    assert node._camera_sweep.previous_yaw is None
+
+
+@pytest.mark.parametrize('reason', ['initial','in_flight','no_targets'])
+def test_surface_keeps_discovery_sweeps_at_task_boundaries(reason):
+    callback,node,commands=surface_control_node([surface_source('current',5.)])
+    if reason=='initial':node._camera_sweep.origin=None
+    elif reason=='in_flight':
+        node._sweep_active=True;node._camera_sweep.previous_yaw=0.
+    else:node._tracker_sources=[]
+    callback(node,60.)
+    assert commands[-1]==(0.,.5) and node._sweep_active
+
+
+def test_surface_failed_navigation_defers_instead_of_repeating_unreached_step():
+    callback,node,commands=surface_control_node([surface_source('current',5.)])
+    node._surface_nav_goal=('current',2.,0.,55.);node._nav2_state='done'
+    callback(node,60.)
+    assert node._surface_deferred['current']==80.
+    assert not node._surface_seen_ids
+    assert commands[-1]==(0.,.5)  # Recover discovery when no source is actionable.
+
+
+def test_arriving_at_intermediate_step_does_not_count_as_source_inspection():
+    callback,node,commands=surface_control_node([surface_source('current',5.)])
+    node._wx=2.;node._surface_nav_goal=('current',2.,0.,55.);node._nav2_state='active'
+    callback(node,60.)
+    assert node._surface_nav_goal is None and not node._surface_seen_ids
+    assert commands[-1][0]>.0
+
+
+def test_transient_block_stops_immediately_then_resumes_without_deferring_source():
+    callback,node,commands=surface_control_node([surface_source('current',5.)])
+    node._direct_guarded_cmd=lambda *args:(0.,0.,'stop',True)
+    callback(node,60.)
+    assert commands[-1] is None  # Zero Twist on the first blocked control tick.
+    assert not node._surface_deferred and node._surface_nav_goal is None
+    node._direct_guarded_cmd=lambda x,y,speed,*args:(speed,0.,'known_free',True)
+    callback(node,60.1)
+    assert commands[-1][0]>.0 and node._surface_blocked_since is None
+    assert not node._surface_deferred and node._surface_nav_goal is None
+
+
+def test_persistent_block_holds_stop_then_routes_to_an_intermediate_step():
+    callback,node,commands=surface_control_node([surface_source('current',5.)])
+    node._direct_guarded_cmd=lambda *args:(0.,0.,'stop',True)
+    for now in (60.,60.4):
+        callback(node,now)
+        assert commands[-1] is None and node._surface_nav_goal is None
+    callback(node,60.6)
+    assert node._surface_nav_goal==('current',2.,0.,60.6)
+    assert commands[-1] is None and not node._surface_deferred
+
+
 def test_rpp_goal_tolerance_does_not_force_heading_only_control():
     import yaml
     config = yaml.safe_load((ROOT / 'thermal_bringup/config/nav2_params.yaml').read_text())

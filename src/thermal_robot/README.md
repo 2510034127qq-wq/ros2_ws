@@ -73,6 +73,8 @@ ros2 launch thermal_bringup sim_nav_slam_launch.py \
 
 Worlds include open, obstacle-field, corridor-room, mixed-room, zigzag and sparse-island layouts. Inspection runs until stopped by the operator or an external budget. No source-count or no-new-source timeout claims the search is complete.
 
+静态接近会保持当前目标，只有新目标明显更近时才切换。受阻立即停车，持续 `surface_blocked_wait_s`（默认 0.5 秒）后才绕行或延期；远处停靠区尚未建清时，允许用已知空闲的近处中间点推进，单步由 `surface_waypoint_step_m`（默认 2 米）限制。B 级起步仍完整扫视，有可执行目标时优先接近，无可执行目标时恢复扫视与探索。中间点到达不计为热源接近完成。
+
 ## Validation and data
 
 ```bash

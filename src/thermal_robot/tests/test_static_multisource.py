@@ -240,9 +240,29 @@ def test_surface_approach_selects_free_footprint_and_rejects_unknown_space():
     view=OccupancyView(-3.,-3.,.1,grid)
     target=surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view)
     assert target is not None and known_free_at(view,np.array([target[0]]),np.array([target[1]]))[0]
+    assert 1.2-1e-6<=np.linalg.norm(target)<2.  # A safe intermediate step is valid.
+    grid[:]=0
+    target=surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view)
     assert np.linalg.norm(target)==pytest.approx(1.2)
     grid[:]=-1
     assert surface_approach_waypoint((-2.,0.),(0.,0.),1.2,view) is None
+
+
+def test_surface_approach_can_advance_before_distant_standoff_is_mapped():
+    from thermal_motion_controller.runtime_policy import surface_approach_waypoint
+    from thermal_field_reconstructor.visibility import OccupancyView,known_free_at
+    grid=np.full((80,140),-1,dtype=np.int16)
+    grid[20:60,30:65]=0  # Only the local patch, not the source at (7,0), is known.
+    view=OccupancyView(-4.,-4.,.1,grid)
+    target=surface_approach_waypoint((0.,0.),(7.,0.),1.2,view,max_step_m=2.)
+    assert target is not None
+    assert .5<np.linalg.norm(target)<=2.+1e-6
+    assert np.linalg.norm(np.asarray(target)-[7.,0.])<6.75
+    angles=np.linspace(0.,2*np.pi,24,endpoint=False)
+    footprint=np.asarray(target)+.35*np.column_stack((np.cos(angles),np.sin(angles)))
+    assert known_free_at(view,footprint[:,0],footprint[:,1]).all()
+    grid[:,40:]=-1  # Only space behind the robot remains known: no progress.
+    assert surface_approach_waypoint((0.,0.),(7.,0.),1.2,view) is None
 
 
 def test_registry_rejects_duplicate_hot_faces_but_keeps_nearby_distinct_sources():

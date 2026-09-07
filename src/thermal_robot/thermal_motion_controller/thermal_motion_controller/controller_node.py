@@ -454,6 +454,8 @@ class ControllerNode(Node):
                              ('posterior_information_weight',1.),('surface_standoff_m',1.2),
                              ('posterior_detection_probability',.85),('posterior_false_alarm_probability',.03),
                              ('posterior_measurement_variance',.2),('surface_robot_radius_m',.35),
+                             ('surface_waypoint_step_m',2.),
+                             ('surface_blocked_wait_s',.5),
                              ('surface_approach_speed',.2),('surface_confirm_hold_s',1.),
                              ('surface_approach_timeout_s',20.),('surface_retry_cooldown_s',20.),
                              ('exploration_goal_timeout_s',45.),('exploration_arrival_m',.6),
@@ -486,6 +488,9 @@ class ControllerNode(Node):
         self._surface_hold=float(g('surface_confirm_hold_s').value)
         self._surface_max_age=float(g('surface_source_max_age_s').value)
         self._surface_robot_radius=float(g('surface_robot_radius_m').value)
+        self._surface_waypoint_step=float(g('surface_waypoint_step_m').value)
+        self._surface_blocked_wait=float(g('surface_blocked_wait_s').value)
+        self._surface_blocked_since=None
         self._surface_seen_ids=set();self._surface_target_id=None;self._surface_hold_start=None
         self._surface_wp=None;self._surface_plan_t=-float('inf')
         self._surface_nav_goal=None;self._surface_deferred={}
@@ -1314,24 +1319,12 @@ class ControllerNode(Node):
         return gain
 
     def _surface_timer(self,now):
-        if self._sensor_model == 'b' and self._surface_nav_goal is None:
-            sweeping=self._camera_sweep.step((self._wx,self._wy),self._odom_yaw,now)
-            if sweeping:
-                if not self._sweep_active:
-                    self._cancel_nav2_goal()
-                    self.get_logger().info('[CAMERA_SWEEP] start')
-                self._sweep_active=True
-                self._pub.publish(self._make_cmd(0.,self._sweep_speed));return
-            if self._sweep_active:
-                self.get_logger().info('[CAMERA_SWEEP] complete')
-                self._sweep_active=False
-                self._surface_wp=None
         if self._surface_nav_goal is not None:
             key,gx,gy,started=self._surface_nav_goal
-            arrived=math.hypot(gx-self._wx,gy-self._wy)<.5 or self._nav2_state==NAV2_DONE
+            arrived=math.hypot(gx-self._wx,gy-self._wy)<.5
             expired=now-started>self._surface_approach_timeout
-            # Nav2 owns progress checking while turning or following a detour.
-            if arrived or expired:
+            # An ended action is not proof of arrival: aborted goals defer too.
+            if arrived or expired or self._nav2_state==NAV2_DONE:
                 self._cancel_nav2_goal();self._surface_nav_goal=None
                 if not arrived:
                     self._surface_deferred[key]=now+self._surface_retry_cooldown
@@ -1344,8 +1337,28 @@ class ControllerNode(Node):
                  or t.get('age_s',0)+latency<self._surface_max_age)
                  and t['probability']>.5 and t['id'] not in self._surface_seen_ids
                  and now>=self._surface_deferred.get(t['id'],-float('inf'))]
+        # Finish an initial/in-flight sweep. Later full sweeps yield to known
+        # actionable sources; coverage resumes when those sources are handled.
+        if (self._sensor_model == 'b' and
+                (self._sweep_active or self._camera_sweep.origin is None or not sources)):
+            sweeping=self._camera_sweep.step((self._wx,self._wy),self._odom_yaw,now)
+            if sweeping:
+                if not self._sweep_active:
+                    self._cancel_nav2_goal()
+                    self.get_logger().info('[CAMERA_SWEEP] start')
+                self._sweep_active=True
+                self._pub.publish(self._make_cmd(0.,self._sweep_speed));return
+            if self._sweep_active:
+                self.get_logger().info('[CAMERA_SWEEP] complete')
+                self._sweep_active=False
+                self._surface_wp=None
         if sources:
-            target=min(sources,key=lambda t:math.hypot(t['x']-self._wx,t['y']-self._wy))
+            distance_to=lambda t:math.hypot(t['x']-self._wx,t['y']-self._wy)
+            nearest=min(sources,key=distance_to)
+            target=next((t for t in sources if t['id']==self._surface_target_id),nearest)
+            # Ignore small estimate/ordering changes, but admit a substantially
+            # closer new source instead of locking onto a long unnecessary trip.
+            if distance_to(nearest)+self._surface_standoff<distance_to(target):target=nearest
             self._cancel_nav2_goal()
             self._state=STATE_CONVERGE
             dx,dy=target['x']-self._wx,target['y']-self._wy
@@ -1353,6 +1366,8 @@ class ControllerNode(Node):
             yaw=math.atan2(dy,dx)
             if self._surface_target_id!=target['id']:
                 self._surface_target_id=target['id'];self._surface_hold_start=None
+                self._surface_blocked_since=None
+                self.get_logger().info(f'[SURFACE_TARGET] {target["id"]}')
             error=math.atan2(math.sin(yaw-self._odom_yaw),math.cos(yaw-self._odom_yaw))
             if distance<=self._surface_standoff+.2 and abs(error)<.25:
                 self._pub.publish(Twist())
@@ -1370,16 +1385,22 @@ class ControllerNode(Node):
             if abs(error)>.5: lin=0.
             guarded,_,_,_=self._direct_guarded_cmd(gx,gy,lin,now,'surface_approach')
             if lin>0. and guarded<=0. and abs(error)<.5:
+                # Stop immediately, but do not abandon a source for one scan.
+                if self._surface_blocked_since is None:self._surface_blocked_since=now
+                if now-self._surface_blocked_since<self._surface_blocked_wait:
+                    self._pub.publish(Twist());return
+                self._surface_blocked_since=None
                 waypoint=surface_approach_waypoint((self._wx,self._wy),(target['x'],target['y']),
-                    self._surface_standoff,self._occ_view,self._surface_robot_radius)
+                    self._surface_standoff,self._occ_view,self._surface_robot_radius,self._surface_waypoint_step)
                 if waypoint is not None:
                     self._surface_nav_goal=(target['id'],*waypoint,now)
                     self.get_logger().info(f'[SURFACE_APPROACH_NAV2] {target["id"]} waypoint={waypoint}')
                 else:
                     self._surface_deferred[target['id']]=now+self._surface_retry_cooldown
                     self._surface_wp=None
-                    self.get_logger().info(f'[SURFACE_APPROACH_DEFERRED] {target["id"]} no known-free standoff')
+                    self.get_logger().info(f'[SURFACE_APPROACH_DEFERRED] {target["id"]} no known-free approach step')
                 self._pub.publish(Twist());return
+            self._surface_blocked_since=None
             lin=min(lin,guarded)
             self._pub.publish(self._make_cmd(lin,ang))
             return

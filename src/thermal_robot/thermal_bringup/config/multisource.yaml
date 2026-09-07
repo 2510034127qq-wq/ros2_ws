@@ -68,6 +68,8 @@ controller_node:
     posterior_measurement_variance: 0.2
     surface_standoff_m: 1.2
     surface_robot_radius_m: 0.35
+    surface_waypoint_step_m: 2.0
+    surface_blocked_wait_s: 0.5
     surface_approach_speed: 0.2
     surface_confirm_hold_s: 1.0
     surface_approach_timeout_s: 20.0
