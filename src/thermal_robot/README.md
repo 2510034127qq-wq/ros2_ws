@@ -1,5 +1,7 @@
 # thermal_robot
 
+Documentation checked against runtime commit `244d067` on 2026-09-14. See the [Chinese handover](../../docs/handover/00-总览与导读.md) and [current status report](../../PROJECT_ANALYSIS_REPORT.md).
+
 ROS 2 Humble workspace for stationary, continuously emitting thermal-source inspection. The robot detects hotspots, locates them on a map, merges repeated observations and explores around obstacles. Moving-source prediction, emission schedules and automatic all-clear decisions have been removed from the active code.
 
 Current scope: [static inspection simplification](../../docs/superpowers/specs/2026-09-06-static-thermal-inspection-design.md). The pre-simplification implementation and research tools remain available in Git at `581c802`; historical measurements do not validate the current version.
@@ -44,9 +46,11 @@ ros2 launch thermal_bringup sim_nav_slam_launch.py \
   use_rviz:=false use_gzclient:=false sensor_model:=b strategy:=dual belief_mode:=online
 ```
 
-Defaults: `sensor_model:=a`, `strategy:=dual`, `belief_mode:=online`, simulation time enabled. `fast` and `gp_ucb` remain comparison strategies; `full/frontier/levy/residual` retain the older static policies. `belief_mode:=shadow` evaluates the slow worker without feedback; `off` disables estimation.
+Defaults: `sensor_model:=a`, `strategy:=dual`, `belief_mode:=online`, ROS simulation time enabled. Some controller timeouts still use monotonic wall time; pausing or accelerating simulation does not scale all policy timers. `fast` and `gp_ucb` remain comparison strategies; `full/frontier/levy/residual` retain the older static policies. `belief_mode:=shadow` evaluates the slow worker without feedback; `off` disables estimation.
 
-Runtime parameters live in `thermal_bringup/config/params.yaml` and `multisource.yaml`. There is no extra task overlay. See [runtime and UGV instructions](../../docs/software/multisource_runtime.md) for parameter details.
+B mode and A with `fast/dual/gp_ucb` use the world-coordinate approach path; only A with `full/frontier/levy/residual` uses the legacy gradient FSM.
+
+Runtime parameters live in `thermal_bringup/config/params.yaml` and `multisource.yaml`. Parameters load base YAML, then `software_params` (replacing the default multisource file), then launch overrides. There is no extra task overlay. See [runtime and UGV instructions](../../docs/software/multisource_runtime.md) for parameter details.
 
 B 级默认目标宽 **0.3 m**、高 **0.8 m**，表面温度在 **28–37℃** 内按源 ID 和运行种子均匀抽取一次，之后保持恒温。环境默认为 22℃，因此默认温差为 6–15℃。更换 `run_seed` 可生成另一组温度，相同种子可复现。
 
@@ -89,7 +93,9 @@ python3 src/thermal_robot/scripts/plot_software_validation.py \
 
 Use a fresh output directory each run. The runner checks source/install consistency and serializes Gazebo sessions. It records runtime health separately from physical-source matching, localization and duplicate labels. A passing runtime probe alone does not establish complete detection or real-device performance.
 
-`run_multiscenario_matrix.py` keeps static 2/3/5-source presets, six world layouts, source matching and resumable evidence checks. Its historical `phase0` preset name now selects a 4-world × 3-static-layout grid. The original dynamic grid and `phase1_gate.py` research acceptance contract have been retired. Use `--help` for current runner options.
+The documentation refresh ran all 211 pure algorithm tests successfully; no ROS/Gazebo or hardware experiment was rerun. The [latest retained approach measurements](../../docs/devlog/2026-09-07-static-approach-strategy.md) show 5/5 detected and 4/5 physically approached in three 180-second B obstacle runs; one 300-second run reached 5/5. A two-source short runs remain inconsistent (0/2 and 1/2). These are limited results, not a complete inspection guarantee.
+
+`run_multiscenario_matrix.py` keeps static 2/3/5-source presets, six world layouts, source matching and resumable evidence checks. Its historical `phase0` preset name now selects a 4-world × 3-static-layout grid. The original dynamic grid and `phase1_gate.py` research acceptance contract have been retired. It currently has no sensor-model option and uses A observations. Use the software validation runner for B. Matrix defaults to `full` and retains wall-clock configuration for legacy strategies; modern strategies use ROS simulation time. Use `--help` for current runner options.
 
 For an already running main launch:
 

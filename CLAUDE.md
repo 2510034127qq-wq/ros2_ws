@@ -1,114 +1,51 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Repository scope
 
-## Build Commands
+ROS 2 Humble / Gazebo Classic workspace. Active code is under `src/thermal_robot/`; follow [AGENTS.md](AGENTS.md). Current scope is stationary, continuously emitting thermal-source inspection. Moving-source tracking, emission schedules, predictive revisits and automatic clearance decisions are removed.
 
-**Interfaces must be built first** (other packages depend on them):
+Use [README](src/thermal_robot/README.md) for commands and [handover](docs/handover/00-总览与导读.md) for implementation details. Historical logs and design/Plan files describe their own versions, not the current runtime.
+
+## Build and test
+
 ```bash
+cd /home/hanchen/ros2_ws
 source /opt/ros/humble/setup.bash
+rosdep check --from-paths src/thermal_robot --ignore-src
 colcon build --packages-select thermal_interfaces
 source install/setup.bash
-colcon build --packages-select \
-    g1_description thermal_sensor_sim signal_preprocessor \
-    thermal_field_reconstructor thermal_gradient_processor \
-    thermal_motion_controller thermal_bringup
+colcon build --packages-select g1_description thermal_sensor_sim signal_preprocessor thermal_field_reconstructor thermal_gradient_processor thermal_motion_controller thermal_bringup
 source install/setup.bash
+python3 -m pytest src/thermal_robot/tests/ -q
 ```
 
-Build a single package:
+Rebuild interfaces before consumers after message changes. Removed Python modules/configuration may survive incremental installs; check source/install consistency. Keep generated build/install/log/bag/cache data out of Git.
+
+## Launch and inspect
+
 ```bash
-colcon build --packages-select <package_name>
-source install/setup.bash
+ros2 launch thermal_bringup sim_nav_slam_launch.py use_rviz:=false use_gzclient:=false
+ros2 launch thermal_bringup sim_nav_slam_launch.py --show-args
 ```
 
-## Testing
+Run one simulation at a time. Defaults: A-level 64×48 at 10 Hz, `dual`, `online`, `use_sim_time:=true`. B-level (`sensor_model:=b`) is 160×120 at 8.6 Hz with depth; B preprocessing defaults to passthrough. Config-B is a three-source layout, distinct from the B observation model.
 
-Run unit tests (pure Python, no ROS required):
+After launch, inspect `/sim/thermal_raw`, `/thermal/filtered`, `/thermal/field`, `/thermal/gradient`, `/thermal/map`, `/thermal/sources`, `/thermal/belief`, `/odom`, `/scan` and `/cmd_vel`. Rates depend on observation mode and controller/Nav2 activity; not every topic runs at 10 Hz.
+
 ```bash
-python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -v
+python3 src/thermal_robot/tests/test_thermal_system.py --ros
+python3 src/thermal_robot/scripts/nav2_health_check.py --timeout 20
+ros2 service call /thermal/get_field_info thermal_interfaces/srv/GetFieldInfo "{include_full_data: true}"
 ```
 
-Run algorithm benchmarks:
-```bash
-python3 src/thermal_robot/tests/test_thermal_system.py --bench
-```
+## Architecture and constraints
 
-Verify topic rates after launching:
-```bash
-ros2 topic hz /sim/thermal_raw      # ~10 Hz
-ros2 topic hz /thermal/filtered     # ~10 Hz
-ros2 topic hz /thermal/field        # ~10 Hz
-ros2 topic hz /thermal/gradient     # ~10 Hz
-ros2 topic hz /cmd_vel              # ~10 Hz
-```
+The thermal image feeds both field/gradient reconstruction and the world thermal mapper. The tracker consumes the thermal map and owns source IDs; the optional slow posterior consumes those registered sources. `dual` admits only healthy, fresh online posterior feedback. `fast` and `gp_ucb` reject slow feedback.
 
-## Launch
+B mode and A with `fast/dual/gp_ucb` use world-coordinate approach/exploration in `_surface_timer`; only A with legacy strategies uses the detailed gradient FSM. Direct Twist commands and Nav2 action execution are alternative command paths. Nav2 completion is not proof of physical source approach.
 
-Full simulation pipeline:
-```bash
-ros2 launch thermal_bringup sim_nav_slam_launch.py
-```
+Simulation odom is absolute Gazebo world pose. Main launch sets mapper/controller spawn offsets to zero; do not add the spawn translation twice. ROS simulation time is enabled, but some strategy durations use monotonic wall time.
 
-Single node test:
-```bash
-ros2 run thermal_sensor_sim sensor_node
-```
+Parameters are layered: `params.yaml`, `multisource.yaml` or `software_params`, then launch overrides. UGV uses an additional `ugv_thermal.yaml` or `hardware_params` overlay. The hardware launch defaults to `enable_motion:=false`, `use_sim_time:=false` and needs external odom/scan/map/TF/Nav2, radiometric images, calibrated CameraInfo and registered depth. Hardware and Pi 5 performance remain unverified.
 
-Query thermal field service:
-```bash
-ros2 service call /thermal/get_field_info \
-  thermal_interfaces/srv/GetFieldInfo "{include_full_data: true}"
-```
-
-Analyze collected simulation data:
-```bash
-python3 src/thermal_robot/scripts/plot_all_figures.py bags/collected/<timestamp>
-python3 src/thermal_robot/scripts/plot_slam_nav2.py bags/collected/<timestamp>
-```
-
-Kill leftover Gazebo processes:
-```bash
-bash src/thermal_robot/kill_gz.sh
-```
-
-## Architecture
-
-This is a ROS 2 Humble workspace implementing autonomous thermal source-seeking navigation for a Unitree G1 robot.
-
-### Processing Pipeline
-
-```
-sensor_node  →  /sim/thermal_raw  (Image 32FC1 64×48 @ 10Hz)
-                        ↓
-preprocessor_node  →  /thermal/filtered  (Image 32FC1 @ 10Hz)
-                        ↓
-reconstructor_node  →  /thermal/field  (ThermalField @ 10Hz)
-                        ↓
-gradient_node  →  /thermal/gradient  (GradientArray @ 10Hz)
-                        ↓
-controller_node  →  /cmd_vel  (Twist @ 10Hz)  →  [Nav2 SLAM]
-```
-
-All packages live under `src/thermal_robot/`.
-
-### Package Roles
-
-- **thermal_interfaces** — Custom msg/srv definitions (`ThermalPoint`, `ThermalField`, `Gradient`, `GradientArray`, `GetFieldInfo`). Must be built before all other packages.
-- **g1_description** — URDF and meshes for Unitree G1 29-DOF + Inspire hands. Contains `g1_nav.urdf` (simplified diff-drive) and `g1_thermal.urdf.xacro` (parametric with sensor).
-- **thermal_sensor_sim** — Simulates a 64×48 thermal camera with 3 configurable heat sources publishing `sensor_msgs/Image` (32FC1 encoding).
-- **signal_preprocessor** — Applies temporal Kalman/MA/EMA filtering and spatial Gaussian blur to raw thermal images.
-- **thermal_field_reconstructor** — Converts filtered images to `ThermalField` messages via linear interpolation; detects hotspots using NMS at `mean + 4°C`.
-- **thermal_gradient_processor** — Computes Sobel or Central Difference gradients at stride-4 subsampling; outputs `GradientArray` with peak detection.
-- **thermal_motion_controller** — Multi-state FSM (ASCENT → CONVERGE → SAMPLE → AT_PEAK → RELOCATE → ESCAPE → FRONTIER_NAV → COARSE_SURVEY → DEPARTURE) implementing gradient ascent + Lévy flight exploration with Nav2 integration.
-- **thermal_bringup** — Main SLAM/Nav2 launch file, RViz config, and central `params.yaml` with tunable parameters for the full pipeline.
-
-### Key Configuration
-
-All node parameters are in `src/thermal_robot/thermal_bringup/config/params.yaml`. Changes here affect behavior of all pipeline nodes simultaneously without code changes.
-
-Nav2 and SLAM Toolbox are configured in `nav2_params.yaml` and `slam_params.yaml` respectively. The controller has a direct `/cmd_vel` fallback when Nav2 is unavailable.
-
-### Custom Interfaces
-
-When adding or modifying `.msg`/`.srv` files in `thermal_interfaces`, rebuild that package first before dependent packages.
+Use [evaluation instructions](docs/handover/04-评测体系与实验.md) for run evidence. Source-count messages, passing probes and unit tests do not establish complete physical-source detection or real-device readiness. Do not feed simulation source truth into controller, mapper, tracker or belief inference.

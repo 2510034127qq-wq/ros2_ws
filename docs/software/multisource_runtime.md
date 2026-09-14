@@ -1,12 +1,14 @@
 # 多热源软件运行与 UGV 接入
 
+核对日期：2026-09-14，运行代码基线 `244d067`。当前实现概况与证据边界见 [现状报告](../../PROJECT_ANALYSIS_REPORT.md)。
+
 当前执行范围以 [2026-09-06 静态持续热源巡检规划](../superpowers/specs/2026-09-06-static-thermal-inspection-design.md) 为准。精简代码：删除移动、生灭事件和自动判断搜完的专用实现；有助于基础能力的观测、去重、地图融合、规划和慢层保留。历史动态研究与验证不代表当前静态任务已达标。
 
 ## 策略与观测
 
-主入口仍是 `sim_nav_slam_launch.py`，新增选项：
+主仿真入口是 `sim_nav_slam_launch.py`，当前选项：
 
-仿真启动默认 `use_sim_time:=true`，热链路、SLAM 和 Nav2 使用仿真时钟。真实 UGV 覆盖层默认 `false`；录包回放显式设置 `true`。原矩阵脚本对历史策略显式保留旧时钟配置，新策略使用仿真时钟；历史实验结果不混入本次软件验收。
+仿真启动默认 `use_sim_time:=true`，热链路、SLAM 和 Nav2 使用 ROS 仿真时钟。控制器部分策略超时仍采用 `time.monotonic()`，不随仿真暂停或变速等比例变化。真实 UGV 覆盖层默认 `false`；录包回放显式设置 `true`。原矩阵脚本对历史策略显式保留旧时钟配置，新策略使用仿真时钟；历史实验结果不混入本次软件验收。
 
 | 参数 | 值 | 行为 |
 |---|---|---|
@@ -26,6 +28,10 @@ ros2 launch thermal_bringup sim_nav_slam_launch.py \
   use_rviz:=false use_gzclient:=false strategy:=dual sensor_model:=b
 ```
 
+参数按 `params.yaml -> software_params（默认 multisource.yaml）-> launch 内联覆盖` 生效；单独启动节点与主 launch 的缺省行为不同。主仿真 odom 已是 Gazebo 世界绝对位姿，mapper/controller 的出生偏移由 launch 清零，不能重复加出生点。
+
+B 级默认物体宽 0.3 m、高 0.8 m；`source_temperature_range_c: [28.0, 37.0]` 是绝对摄氏表面温度，按 ID/种子抽取后恒定，覆盖 B 场景 amplitude；A 保持场景温升。详细示例见 [README](../../src/thermal_robot/README.md)。
+
 B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时 world 中加入热源对应的盒体或柱体。前视热图通过最近表面射线交点生成；深度为 optical-z 米。目标固定位置、持续发热；动态场景生成和实体移动同步已删除。指定发热面由 `surface_hot_faces` 控制，`[-1]` 为全部表面。盒体面编号依次是 -x/+x/-y/+y/-z/+z，柱体为侧面/底面/顶面。
 
 温度扰动参数包括噪声、偏置、漂移、emissivity 和深度噪声/失效。辐射采用灰体 T^4 混合近似；不宣称是完整 LWIR 光谱、热传导或反射模拟。算法只接收热图、深度、CameraInfo、里程计和 SLAM 地图，`/sim/thermal_sources_truth` 仅供评测。
@@ -34,13 +40,13 @@ B 级从当前 world 的碰撞几何构造遮挡场景，同时在 Gazebo 临时
 
 - 快层默认 2 Hz：二维位置 Gaussian filter、一对一关联、多帧确认。位置在缺测时保持不变，协方差允许地图/配准漂移。关联保留协方差归一化项和实测位置门控，防止不确定的旧标签抢占新观测。
 - 快层是唯一身份登记入口：只有 candidate / confirmed 两种状态。候选需连续多帧、置信度和定位协方差达标才确认，未确认候选超过 `candidate_timeout_s`（默认 12 秒）无观测即清理。已确认静态热源在本次运行中保留 ID、确认状态和登记位置，不按缺测时长或冷观测退役；`age_s` 继续增长，历史登记不表示当前可见。
-- B 级控制在启动、移动 4 米或上次扫描完成 60 秒后进行一周相机转向扫描，完成条件使用里程计累计转角。探索目标到达半径为 0.6 米，正常推进时保持目标；持续 12 秒无位移或 45 秒超时会重选，并临时排除失败目标附近 2 米。地图尚未准备好时等待/扫描，不发起长距离随机退路。参数均在 `multisource.yaml`，需要按底盘和场景调整。
+- B 级完整执行起步/正在进行的扫视；后续有可执行目标时优先接近，无目标时按移动 4 米或距上次完成 60 秒触发整周扫视，完成条件使用里程计累计转角。探索目标到达半径为 0.6 米，正常推进时保持目标；持续 12 秒无位移或 45 秒超时会重选，并临时排除失败目标附近 2 米。地图尚未准备好时等待/扫描，不发起长距离随机退路。参数均在 `multisource.yaml`，需要按底盘和场景调整。
 - 慢层订阅 `/thermal/sources` 作为唯一身份来源，按同一 ID 更新位置高斯、强度与尺度；不再独立建标签、关联新生目标、确认、剪枝或合并。存在置信度和确认状态来自登记层，Bernoulli 卷积仅描述已登记假设的源数，不推断未发现目标，也不是搜完概率。A 级保留新鲜地图的强度/尺度拟合，B 级保留表面观测属性更新。
 - 登记层阻止已知目标附近的重复候选，已确认 ID 不相互合并。Kalman 路线使用 `merge_radius_m`，legacy 路线保留原基线的 `duplicate_radius_m` 排斥范围；小于合并尺度的相邻真实热源仍可能难以区分。
 - 慢层独立进程，发布 `/thermal/belief` 的 health、revision、compute_ms、cardinality_pmf。失败/超预算不输出可用新估计；控制器按健康状态及时间戳拒绝过期后验。
 - online 模式将期望存在性熵降与定位信息收益用于选点，并按相同 ID 通过保守协方差交集给快层位置校正。shadow 不影响规划或快层；off 时快层独立运行。
 - `fast` 和 `gp_ucb` 不接受慢层先验，即使慢层仍在 online 估计。`belief_mode` 是启动选项，切换模式时重新启动覆盖层。`off` 在 launch 中显式按字符串传递。
-- 新控制路径按世界坐标接近源并保持停靠距离；直达被挡时尝试已知空闲停靠点与 Nav2 绕行，无可用停靠点或导航停滞时暂缓该源并继续探索，冷却后可重试。Nav2 探索停滞有原有受扫描保护的直接控制回退。
+- B 级以及 A + fast/dual/gp_ucb 使用 `_surface_timer()` 世界坐标接近，只有 A + full/frontier/levy/residual 执行旧梯度 FSM。新控制路径保持目标，仅明显更近的源可触发切换，并保持停靠距离；直达被挡时尝试已知空闲停靠点与 Nav2 绕行，无可用停靠点或导航停滞时暂缓该源并继续探索，冷却后可重试。直接控制仍受地图/雷达保护；现代路径已去掉重复的 4 秒 Nav2 距离进展判定。持续受阻默认等待 0.5 秒后尝试安全局部中间点（步长默认 2 m）或延期；action 结束和中间点到达都不等于物理接近完成。
 - 控制器直接使用登记表中的已知位置，已处理集合按稳定 ID 记录；已确认但不在画面中的目标仍可作为待访问位置。候选接近仍要求新鲜观测，雷达避障间距、相机扫描、失败点冷却和慢层超时回退保留。预测重访和搜完概率模块已删除，也不按预设源数或“很久没找到新源”自动结束。
 
 ## UGV 与 Lepton/PT3
@@ -78,7 +84,7 @@ python3 src/thermal_robot/scripts/run_software_validation.py \
   --duration 90 --domain 151
 ```
 
-每次使用新输出目录，保留启动日志、probe JSON、轨迹摘要、源估计和图像快照。软件 probe 检查数据链、有效深度、地图观测、运动输出和慢层状态，不以它替代全矩阵 recall/precision 验收。实际结果与剩余限制在最终交付审计中记录。
+每次使用新输出目录，保留启动日志、probe JSON、轨迹摘要、源估计和图像快照。软件 probe 检查数据链、有效深度、地图观测、运动输出和慢层状态，不以它替代全矩阵 recall/precision 验收。现有记录与剩余限制见 [当前现状报告](../../PROJECT_ANALYSIS_REPORT.md) 和 [评测说明](../handover/04-评测体系与实验.md)，旧交付审计只记录其对应版本。
 
 验证器在启动前比较源码与 install，发现未重新构建的文件直接退出；执行期间检查节点崩溃、话题停止及实际位移。Gazebo Classic 用同一个 master 端口，本工具通过锁防止自身并发运行；请逐个运行验证用例。`--seed`、`--scenario`、`--world`、`--duration` 可选择缩减矩阵。慢层预算注入可通过覆盖 YAML 和 `--expected-health over_budget` 运行。覆盖 YAML 的副本保留在输出目录。
 
@@ -102,6 +108,8 @@ python3 src/thermal_robot/scripts/plot_software_validation.py \
 
 静态对照可固定场景、seed 和预算，比较 fast/dual 或 online/shadow/off；也可通过 `software_params` 改 `residual_enabled` 或 mapper 的 `visibility_enabled`。B 级物理遮挡不因关闭算法可见性而消失。`posterior_detection_probability` 和 `posterior_false_alarm_probability` 仅是规划信息收益的观测假设。
 
-当前精简与实测证据见 [精简验证记录](../devlog/2026-09-06-static-inspection-simplification.md)。[旧软件交付审计](software_completion_audit.md) 仅对应精简前版本。
+较早精简的历史实测证据见 [精简验证记录](../devlog/2026-09-06-static-inspection-simplification.md)。[旧软件交付审计](software_completion_audit.md) 仅对应精简前版本。
 
 2026-09-07 统一登记变更见 [目标管理精简记录](../devlog/2026-09-07-static-source-registry.md)。删除 `stale_after_s`、`stale_decay_s`、`duplicate_memory_s`、`cold_evidence_decay_s` 和慢层独立生命周期参数；用户自定义覆盖文件需要同步。源身份和已处理记录目前只保存在进程内，重启会新建会话。误确认不会在本会话内自动撤销；本任务依赖确认前过滤，不提供移动/熄灭识别或长期误检撤销流程。
+
+最近接近变更的闭环记录见 [静态接近策略](../devlog/2026-09-07-static-approach-strategy.md)：B 五源障碍场三组 180 秒均发现 5/5、物理接近 4/5，单次 300 秒达到 5/5；A 双源同配置短跑仍为 0/2、1/2。此次文档核对只运行纯算法测试（211 项通过），没有重跑这些闭环或实机。

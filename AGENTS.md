@@ -5,12 +5,12 @@
 This is a ROS 2 Humble workspace. Active code lives under `src/thermal_robot/`.
 The main packages are:
 
-- `thermal_bringup`: active launch, Nav2/SLAM configs, RViz config, and Gazebo world.
+- `thermal_bringup`: simulation/UGV launch files, Nav2/SLAM configs, RViz config, and Gazebo worlds.
 - `thermal_sensor_sim`, `signal_preprocessor`, `thermal_field_reconstructor`, `thermal_gradient_processor`, `thermal_motion_controller`: runtime thermal pipeline and controller nodes.
 - `thermal_interfaces`: custom messages and services.
 - `g1_description`: active `g1_nav.urdf` plus retained G1 mesh/URDF assets.
 
-Tests are in `src/thermal_robot/tests/`. Data tools are in `src/thermal_robot/scripts/`. The current main launch is `sim_nav_slam_launch.py`; do not restore removed legacy launch or plotting files.
+Tests are in `src/thermal_robot/tests/`. Data tools are in `src/thermal_robot/scripts/`. The simulation launch is `sim_nav_slam_launch.py`; the hardware overlay is `ugv_thermal_launch.py` (motion disabled by default). Current scope is stationary, continuously emitting sources. The tracker owns source identities; optional slow belief consumes that registry. Do not reintroduce moving-source, emission-schedule or automatic-clearance behavior. For current architecture see `docs/handover/00-总览与导读.md`. Keep historical logs and redesign plans distinct from current documentation. Do not restore removed legacy launch or plotting files.
 
 ## Build, Test, and Development Commands
 
@@ -49,7 +49,7 @@ Use Python 3 with 4-space indentation and `snake_case` names. ROS node files use
 Use `pytest` for pure algorithm tests:
 
 ```bash
-python3 -m pytest src/thermal_robot/tests/test_thermal_system.py -q
+python3 -m pytest src/thermal_robot/tests/ -q
 ```
 
 ROS integration checks require the main launch to be running first:
@@ -58,7 +58,9 @@ ROS integration checks require the main launch to be running first:
 python3 src/thermal_robot/tests/test_thermal_system.py --ros
 ```
 
-After launch, verify `/sim/thermal_raw`, `/thermal/filtered`, `/thermal/field`, `/thermal/gradient`, `/odom`, `/scan`, and `/cmd_vel` with `ros2 topic hz`.
+Simulation defaults are `sensor_model:=a strategy:=dual belief_mode:=online use_sim_time:=true`; B mode uses 160×120 at 8.6 Hz. Parameters layer `params.yaml`, `multisource.yaml` (or `software_params`), then launch overrides. Simulation odom is absolute Gazebo world pose; mapper/controller offsets are zero in the main launch. UGV additionally loads `ugv_thermal.yaml` or `hardware_params`.
+
+After launch, verify `/sim/thermal_raw`, `/thermal/filtered`, `/thermal/field`, `/thermal/gradient`, `/thermal/map`, `/thermal/sources`, `/thermal/belief` (when enabled), `/odom`, `/scan`, and `/cmd_vel` with `ros2 topic hz`.
 
 ## Commit & Pull Request Guidelines
 
